@@ -72,6 +72,9 @@
                       [attr.aria-label]="selectedCamera()?.name || selectedCameraId() || 'camera'"
                       (loadeddata)="resumeLivePlayback()"
                       (canplay)="resumeLivePlayback()"
+                      (seeking)="resumeLivePlayback()"
+                      (waiting)="resumeLivePlayback()"
+                      (stalled)="resumeLivePlayback()"
                       (click)="resumeLivePlayback()"
                     ></video>
                   } @else if (selectedLiveUrl(); as liveUrl) {

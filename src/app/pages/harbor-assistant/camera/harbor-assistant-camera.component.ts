@@ -159,7 +159,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsAttachToken = 0;
   private hlsPlaybackToken = 0;
   private hlsRecoveryAttempts = 0;
+  private liveEdgeMonitor: number | null = null;
   private hls: Hls | null = null;
+  private readonly liveEdgeBackoffSeconds = 1.2;
+  private readonly liveEdgeMaxDriftSeconds = 3;
 
   ngOnInit(): void {
     this.refreshCameraDvr();
@@ -672,6 +675,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   resumeLivePlayback(): void {
+    this.seekLiveVideoToEdge(true);
     this.scheduleLiveVideoPlayback();
   }
 
@@ -1455,8 +1459,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     video.playsInline = true;
     if (Hls.isSupported()) {
       const hls = new Hls({
-        backBufferLength: 30,
+        backBufferLength: 3,
         lowLatencyMode: true,
+        liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 4,
+        maxBufferLength: 4,
+        maxMaxBufferLength: 6,
+        maxLiveSyncPlaybackRate: 1.4,
       });
       this.hls = hls;
       hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -1474,9 +1483,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       });
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         this.hlsLiveStatus.set('live');
+        this.startLiveEdgeMonitor();
+        this.seekLiveVideoToEdge(true);
         this.scheduleLiveVideoPlayback();
       });
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
+        this.seekLiveVideoToEdge();
         this.scheduleLiveVideoPlayback();
       });
       hls.loadSource(url);
@@ -1486,6 +1498,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = url;
       video.load();
+      this.startLiveEdgeMonitor();
       this.scheduleLiveVideoPlayback();
       return true;
     }
@@ -1549,6 +1562,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       }
       video.muted = true;
       video.playsInline = true;
+      this.seekLiveVideoToEdge();
       if (!video.paused && video.currentTime > 0) {
         this.hlsLiveError.set(null);
         return;
@@ -1567,6 +1581,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   private stopHlsPlayback(): void {
+    this.stopLiveEdgeMonitor();
     if (this.hls) {
       this.hls.destroy();
       this.hls = null;
@@ -1574,9 +1589,54 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const video = this.liveVideo?.nativeElement;
     if (video) {
       video.pause();
+      video.playbackRate = 1;
       video.removeAttribute('src');
       video.load();
     }
+  }
+
+  private startLiveEdgeMonitor(): void {
+    this.stopLiveEdgeMonitor();
+    this.liveEdgeMonitor = window.setInterval(() => {
+      if (!this.hlsLiveUrl() || this.hlsLiveStatus() !== 'live') {
+        return;
+      }
+      this.seekLiveVideoToEdge();
+    }, 1200);
+  }
+
+  private stopLiveEdgeMonitor(): void {
+    if (this.liveEdgeMonitor === null) {
+      return;
+    }
+    window.clearInterval(this.liveEdgeMonitor);
+    this.liveEdgeMonitor = null;
+  }
+
+  private seekLiveVideoToEdge(force = false): void {
+    const video = this.liveVideo?.nativeElement;
+    const liveEdge = video ? this.liveVideoEdgeSeconds(video) : null;
+    if (!video || liveEdge === null) {
+      return;
+    }
+
+    const targetTime = Math.max(0, liveEdge - this.liveEdgeBackoffSeconds);
+    const driftSeconds = liveEdge - video.currentTime;
+    if (force || driftSeconds > this.liveEdgeMaxDriftSeconds) {
+      video.currentTime = targetTime;
+      video.playbackRate = 1;
+      return;
+    }
+    video.playbackRate = driftSeconds > this.liveEdgeBackoffSeconds + 0.8 ? 1.15 : 1;
+  }
+
+  private liveVideoEdgeSeconds(video: HTMLVideoElement): number | null {
+    const seekable = video.seekable;
+    if (!seekable || seekable.length === 0) {
+      return null;
+    }
+    const liveEdge = seekable.end(seekable.length - 1);
+    return Number.isFinite(liveEdge) ? liveEdge : null;
   }
 
   private scrollToSearchResults(): void {

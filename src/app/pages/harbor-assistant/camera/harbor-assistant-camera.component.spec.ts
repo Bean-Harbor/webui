@@ -123,6 +123,34 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('moves stale HLS playback back near the live edge', fakeAsync(() => {
+    spectator = createComponent();
+    const video = fakeLiveVideo({
+      currentTime: 12,
+      paused: false,
+      playbackRate: 1,
+      seekable: {
+        end: jest.fn(() => 30),
+        length: 1,
+        start: jest.fn(() => 0),
+      } as unknown as TimeRanges,
+    });
+    const componentState = spectator.component as unknown as {
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+    };
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: video };
+
+    spectator.component.resumeLivePlayback();
+
+    expect(video.currentTime).toBeCloseTo(28.8);
+    expect(video.playbackRate).toBe(1);
+    discardPeriodicTasks();
+  }));
+
   it('prefers hls.js when native HLS probing is unreliable', fakeAsync(() => {
     spectator = createComponent();
     const playlistUrl = '/api/beacon/cameras/cam-1/live/live-test/index.m3u8';
@@ -590,6 +618,7 @@ function fakeLiveVideo(options: Partial<HTMLVideoElement> = {}): HTMLVideoElemen
     pause: jest.fn(),
     paused: true,
     play: jest.fn(() => Promise.resolve()),
+    playbackRate: 1,
     playsInline: false,
     removeAttribute: jest.fn(),
     ...options,
