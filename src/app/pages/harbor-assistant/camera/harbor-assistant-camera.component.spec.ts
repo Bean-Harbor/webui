@@ -92,10 +92,13 @@ describe('Harbor Assistant camera component', () => {
     componentState.liveVideo = {
       nativeElement: {
         currentTime: 0,
+        load: jest.fn(),
         muted: false,
+        pause: jest.fn(),
         paused: true,
         play,
         playsInline: false,
+        removeAttribute: jest.fn(),
       } as unknown as HTMLVideoElement,
     };
 
