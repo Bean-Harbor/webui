@@ -158,6 +158,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private liveFeedbackToken = 0;
   private hlsAttachToken = 0;
   private hlsPlaybackToken = 0;
+  private hlsRecoveryAttempts = 0;
   private hls: Hls | null = null;
 
   ngOnInit(): void {
@@ -540,6 +541,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsLiveUrl.set(null);
     this.hlsAttachToken += 1;
     this.hlsPlaybackToken += 1;
+    this.hlsRecoveryAttempts = 0;
     this.stopHlsPlayback();
     this.api.startCameraLiveSession(deviceId).pipe(
       finalize(() => {
@@ -622,6 +624,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const deviceId = session?.device_id ?? this.selectedCameraId();
     this.hlsAttachToken += 1;
     this.hlsPlaybackToken += 1;
+    this.hlsRecoveryAttempts = 0;
     this.stopHlsPlayback();
     this.hlsLiveUrl.set(null);
     this.hlsLiveStatus.set('stopped');
@@ -1446,6 +1449,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return false;
     }
     this.stopHlsPlayback();
+    this.hlsRecoveryAttempts = 0;
     video.autoplay = true;
     video.muted = true;
     video.playsInline = true;
@@ -1459,8 +1463,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         if (!data.fatal) {
           return;
         }
+        if (this.recoverHlsPlayback(hls, data)) {
+          return;
+        }
         this.hlsLiveStatus.set('degraded');
-        this.hlsLiveError.set('Live HLS playback failed. Snapshot fallback is still available.');
+        this.hlsLiveError.set(
+          `Live HLS playback failed (${this.describeHlsError(data)}). Snapshot fallback is still available.`,
+        );
         this.stopHlsPlayback();
       });
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -1483,6 +1492,36 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsLiveStatus.set('degraded');
     this.hlsLiveError.set('This browser cannot play local HLS live video.');
     return true;
+  }
+
+  private recoverHlsPlayback(hls: Hls, data: { details?: unknown; type?: unknown }): boolean {
+    if (this.hlsRecoveryAttempts >= 3) {
+      return false;
+    }
+    const type = typeof data.type === 'string' ? data.type : '';
+    if (type === 'networkError') {
+      this.hlsRecoveryAttempts += 1;
+      this.hlsLiveError.set(`Live HLS network error; retrying (${this.describeHlsError(data)}).`);
+      hls.startLoad();
+      this.scheduleLiveVideoPlayback();
+      return true;
+    }
+    if (type === 'mediaError') {
+      this.hlsRecoveryAttempts += 1;
+      this.hlsLiveError.set(`Live HLS media error; retrying (${this.describeHlsError(data)}).`);
+      hls.recoverMediaError();
+      this.scheduleLiveVideoPlayback();
+      return true;
+    }
+    return false;
+  }
+
+  private describeHlsError(data: { details?: unknown; error?: unknown; type?: unknown }): string {
+    const type = typeof data.type === 'string' && data.type.trim() ? data.type.trim() : 'unknown';
+    const details = typeof data.details === 'string' && data.details.trim() ? data.details.trim() : 'unknown';
+    const error = data.error instanceof Error && data.error.message.trim() ? data.error.message.trim() : null;
+    const message = error ? `${type}/${details}: ${error}` : `${type}/${details}`;
+    return message.slice(0, 160);
   }
 
   private scheduleLiveVideoPlayback(

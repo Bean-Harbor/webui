@@ -53,6 +53,10 @@ describe('Harbor Assistant camera component', () => {
     };
   });
 
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   it('uses snapshot polling instead of long-running MJPEG for stream-only cameras', fakeAsync(() => {
     api.cameraState = jest.fn(() => of(cameraState({
       snapshotUrl: null,
@@ -155,6 +159,48 @@ describe('Harbor Assistant camera component', () => {
     expect(loadSource).toHaveBeenCalledWith(playlistUrl);
     expect(attachMedia).toHaveBeenCalledWith(video);
     expect(video.canPlayType).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('recovers fatal hls.js media errors before degrading live playback', fakeAsync(() => {
+    spectator = createComponent();
+    const playlistUrl = '/api/beacon/cameras/cam-1/live/live-test/index.m3u8';
+    const hlsHandlers = new Map<string, (event: string, data: { details: string; fatal: boolean; type: string }) => void>();
+    const recoverMediaError = jest.spyOn(Hls.prototype, 'recoverMediaError').mockImplementation(jest.fn());
+    jest.spyOn(Hls, 'isSupported').mockReturnValue(true);
+    jest.spyOn(Hls.prototype, 'loadSource').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'attachMedia').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'destroy').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'on').mockImplementation((event, handler) => {
+      hlsHandlers.set(
+        event,
+        handler as (event: string, data: { details: string; fatal: boolean; type: string }) => void,
+      );
+    });
+    const componentState = spectator.component as unknown as {
+      attachHlsPlayback: () => boolean;
+      hlsLiveError: () => string | null;
+      hlsLiveStatus: {
+        set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void;
+      } & (() => string);
+      hlsLiveUrl: { set: (value: string | null) => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+    };
+    componentState.hlsLiveUrl.set(playlistUrl);
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: fakeLiveVideo() };
+
+    expect(componentState.attachHlsPlayback()).toBe(true);
+    hlsHandlers.get(Hls.Events.ERROR)?.('hlsError', {
+      details: 'bufferAppendError',
+      fatal: true,
+      type: 'mediaError',
+    });
+
+    expect(recoverMediaError).toHaveBeenCalled();
+    expect(componentState.hlsLiveStatus()).toBe('live');
+    expect(componentState.hlsLiveError()).toBe('Live HLS media error; retrying (mediaError/bufferAppendError).');
+    tick();
     discardPeriodicTasks();
   }));
 
@@ -532,6 +578,22 @@ function dvrStatus(status = 'stopped'): HarborAssistantSearchDvrStatusResponse {
       },
     ],
   };
+}
+
+function fakeLiveVideo(options: Partial<HTMLVideoElement> = {}): HTMLVideoElement {
+  return {
+    autoplay: false,
+    canPlayType: jest.fn(() => 'maybe'),
+    currentTime: 0,
+    load: jest.fn(),
+    muted: false,
+    pause: jest.fn(),
+    paused: true,
+    play: jest.fn(() => Promise.resolve()),
+    playsInline: false,
+    removeAttribute: jest.fn(),
+    ...options,
+  } as unknown as HTMLVideoElement;
 }
 
 function liveSession(options: Partial<HarborAssistantCameraLiveSessionResponse> = {}): HarborAssistantCameraLiveSessionResponse {
