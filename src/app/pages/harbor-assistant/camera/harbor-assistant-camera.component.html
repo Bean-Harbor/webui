@@ -70,6 +70,9 @@
                       playsinline
                       preload="auto"
                       [attr.aria-label]="selectedCamera()?.name || selectedCameraId() || 'camera'"
+                      (loadeddata)="resumeLivePlayback()"
+                      (canplay)="resumeLivePlayback()"
+                      (click)="resumeLivePlayback()"
                     ></video>
                   } @else if (selectedLiveUrl(); as liveUrl) {
                     <img

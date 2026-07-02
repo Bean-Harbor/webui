@@ -156,6 +156,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private cameraRefreshRetryQueued = false;
   private actionMessageToken = 0;
   private liveFeedbackToken = 0;
+  private hlsAttachToken = 0;
+  private hlsPlaybackToken = 0;
   private hls: Hls | null = null;
 
   ngOnInit(): void {
@@ -536,6 +538,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsLiveStatus.set('starting');
     this.hlsLiveError.set(null);
     this.hlsLiveUrl.set(null);
+    this.hlsAttachToken += 1;
+    this.hlsPlaybackToken += 1;
     this.stopHlsPlayback();
     this.api.startCameraLiveSession(deviceId).pipe(
       finalize(() => {
@@ -581,7 +585,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
           this.hlsLiveUrl.set(harborAssistantSearchSameOriginAdminUrl(status.playlist_url));
           this.hlsLiveStatus.set('live');
           this.showLiveFeedback('Live started.', 1800);
-          window.setTimeout(() => this.attachHlsPlayback(), 0);
+          this.scheduleHlsPlaybackAttach();
           return;
         }
         if (status.status === 'failed' || status.status === 'degraded' || status.status === 'stopped') {
@@ -616,6 +620,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   stopLive(showMessage = true): void {
     const session = this.hlsLiveSession();
     const deviceId = session?.device_id ?? this.selectedCameraId();
+    this.hlsAttachToken += 1;
+    this.hlsPlaybackToken += 1;
     this.stopHlsPlayback();
     this.hlsLiveUrl.set(null);
     this.hlsLiveStatus.set('stopped');
@@ -660,6 +666,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   liveCanStop(): boolean {
     return this.hlsLiveStatus() === 'starting' || this.hlsLiveStatus() === 'live';
+  }
+
+  resumeLivePlayback(): void {
+    this.scheduleLiveVideoPlayback();
   }
 
   ptzAction(direction: string): void {
@@ -1398,27 +1408,56 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     });
   }
 
-  private attachHlsPlayback(): void {
+  private scheduleHlsPlaybackAttach(
+    attempt = 0,
+    url = this.hlsLiveUrl(),
+    token = this.hlsAttachToken + 1,
+  ): void {
+    if (!url) {
+      return;
+    }
+    if (attempt === 0) {
+      this.hlsAttachToken = token;
+    }
+    window.setTimeout(() => {
+      if (
+        this.hlsAttachToken !== token
+        || this.hlsLiveUrl() !== url
+        || this.hlsLiveStatus() === 'stopped'
+      ) {
+        return;
+      }
+      if (this.attachHlsPlayback()) {
+        return;
+      }
+      if (attempt < 20) {
+        this.scheduleHlsPlaybackAttach(attempt + 1, url, token);
+        return;
+      }
+      this.hlsLiveStatus.set('degraded');
+      this.hlsLiveError.set('Live player did not initialize. Retry live playback.');
+    }, attempt === 0 ? 0 : 100);
+  }
+
+  private attachHlsPlayback(): boolean {
     const url = this.hlsLiveUrl();
     const video = this.liveVideo?.nativeElement;
     if (!url || !video) {
-      return;
+      return false;
     }
     this.stopHlsPlayback();
     video.muted = true;
     video.playsInline = true;
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = url;
-      void video.play().catch(() => {
-        this.hlsLiveStatus.set('degraded');
-        this.hlsLiveError.set('Browser blocked live autoplay. Press Play again.');
-      });
-      return;
+      video.load();
+      this.scheduleLiveVideoPlayback();
+      return true;
     }
     if (!Hls.isSupported()) {
       this.hlsLiveStatus.set('degraded');
       this.hlsLiveError.set('This browser cannot play local HLS live video.');
-      return;
+      return true;
     }
     const hls = new Hls({
       backBufferLength: 30,
@@ -1435,13 +1474,56 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     });
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       this.hlsLiveStatus.set('live');
-      void video.play().catch(() => {
-        this.hlsLiveStatus.set('degraded');
-        this.hlsLiveError.set('Browser blocked live autoplay. Press Play again.');
-      });
+      this.scheduleLiveVideoPlayback();
+    });
+    hls.on(Hls.Events.FRAG_BUFFERED, () => {
+      this.scheduleLiveVideoPlayback();
     });
     hls.loadSource(url);
     hls.attachMedia(video);
+    return true;
+  }
+
+  private scheduleLiveVideoPlayback(
+    attempt = 0,
+    url = this.hlsLiveUrl(),
+    token = this.hlsPlaybackToken + 1,
+  ): void {
+    if (!url) {
+      return;
+    }
+    if (attempt === 0) {
+      this.hlsPlaybackToken = token;
+    }
+    window.setTimeout(() => {
+      if (
+        this.hlsPlaybackToken !== token
+        || this.hlsLiveUrl() !== url
+        || this.hlsLiveStatus() === 'stopped'
+      ) {
+        return;
+      }
+      const video = this.liveVideo?.nativeElement;
+      if (!video) {
+        return;
+      }
+      video.muted = true;
+      video.playsInline = true;
+      if (!video.paused && video.currentTime > 0) {
+        this.hlsLiveError.set(null);
+        return;
+      }
+      void video.play().then(() => {
+        this.hlsLiveError.set(null);
+      }).catch(() => {
+        if (attempt >= 6) {
+          this.hlsLiveError.set('Browser paused live playback. Press the video play control.');
+        }
+      });
+      if (attempt < 6) {
+        this.scheduleLiveVideoPlayback(attempt + 1, url, token);
+      }
+    }, attempt === 0 ? 0 : 350);
   }
 
   private stopHlsPlayback(): void {

@@ -1,4 +1,4 @@
-import { fakeAsync, tick, discardPeriodicTasks } from '@angular/core/testing';
+import { fakeAsync, tick, discardPeriodicTasks, flushMicrotasks } from '@angular/core/testing';
 import { createComponentFactory, Spectator } from '@ngneat/spectator/jest';
 import { MockComponent } from 'ng-mocks';
 import { of, Subject, throwError } from 'rxjs';
@@ -73,6 +73,45 @@ describe('Harbor Assistant camera component', () => {
 
     expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1');
     expect(spectator.component.liveModeLabel()).toBe('Live H.264');
+    discardPeriodicTasks();
+  }));
+
+  it('keeps HLS live visible and reports paused browser playback', fakeAsync(() => {
+    spectator = createComponent();
+    const play = jest.fn(() => Promise.reject(new Error('autoplay paused')));
+    const componentState = spectator.component as unknown as {
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: {
+        set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void;
+      } & (() => string);
+      hlsLiveError: () => string | null;
+      liveVideo?: { nativeElement: HTMLVideoElement };
+    };
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = {
+      nativeElement: {
+        currentTime: 0,
+        muted: false,
+        paused: true,
+        play,
+        playsInline: false,
+      } as unknown as HTMLVideoElement,
+    };
+
+    spectator.component.resumeLivePlayback();
+    tick();
+    flushMicrotasks();
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      tick(350);
+      flushMicrotasks();
+    }
+
+    expect(play).toHaveBeenCalledTimes(7);
+    expect(componentState.hlsLiveStatus()).toBe('live');
+    expect(componentState.hlsLiveError()).toBe(
+      'Browser paused live playback. Press the video play control.',
+    );
     discardPeriodicTasks();
   }));
 
