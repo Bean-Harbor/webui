@@ -62,10 +62,10 @@ export class HarborAssistantContentApiService {
     );
   }
 
-  startCameraLiveSession(deviceId: string): Observable<HarborAssistantCameraLiveSessionResponse> {
+  startCameraLiveSession(deviceId: string, streamProfile = 'sub'): Observable<HarborAssistantCameraLiveSessionResponse> {
     return this.http.post<HarborAssistantCameraLiveSessionResponse>(
       this.apiUrl(`/cameras/${encodeURIComponent(deviceId)}/live/start`),
-      {},
+      { stream_profile: streamProfile },
     );
   }
 

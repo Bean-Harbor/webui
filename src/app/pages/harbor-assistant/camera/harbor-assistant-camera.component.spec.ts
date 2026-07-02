@@ -76,8 +76,24 @@ describe('Harbor Assistant camera component', () => {
 
     spectator.component.startLive();
 
-    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1');
-    expect(spectator.component.liveModeLabel()).toBe('Live H.264');
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'sub');
+    expect(spectator.component.liveModeLabel()).toBe('Live H.264 sub');
+    discardPeriodicTasks();
+  }));
+
+  it('starts the selected main HLS stream profile', fakeAsync(() => {
+    spectator = createComponent();
+    api.startCameraLiveSession = jest.fn(() => of(liveSession({ stream_profile: 'main' })));
+    api.cameraLiveStatus = jest.fn(() => of(liveSession({ stream_profile: 'main' })));
+    const componentState = spectator.component as unknown as {
+      selectStreamProfile: (profile: 'sub' | 'main') => void;
+    };
+
+    componentState.selectStreamProfile('main');
+    spectator.component.startLive();
+
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'main');
+    expect(spectator.component.liveModeLabel()).toBe('Live H.264 main');
     discardPeriodicTasks();
   }));
 
@@ -660,6 +676,7 @@ function liveSession(options: Partial<HarborAssistantCameraLiveSessionResponse> 
     playlist_ready: true,
     mode: 'hls_fmp4',
     codec: 'h264_copy',
+    stream_profile: 'sub',
     started_at: '1714600000',
     updated_at: '1714600001',
     message: 'H.264 live remux is running',

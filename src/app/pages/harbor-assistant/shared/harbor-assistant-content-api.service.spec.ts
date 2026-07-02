@@ -133,6 +133,22 @@ describe('Harbor Assistant content API service', () => {
     });
     expect((await stopPromise).statuses[0].status).toBe('stopped');
 
+    const livePromise = firstValueFrom(spectator.service.startCameraLiveSession('camera-main', 'main'));
+    const liveReq = httpMock.expectOne('/api/harbor-beacon/cameras/camera-main/live/start');
+    expect(liveReq.request.method).toBe('POST');
+    expect(liveReq.request.body).toEqual({ stream_profile: 'main' });
+    liveReq.flush({
+      device_id: 'camera-main',
+      session_id: 'live-main',
+      status: 'running',
+      playlist_ready: true,
+      mode: 'hls_fmp4',
+      codec: 'h264_low_latency',
+      stream_profile: 'main',
+      updated_at: '4',
+    });
+    expect((await livePromise).stream_profile).toBe('main');
+
     const snapshotPromise = firstValueFrom(spectator.service.createSnapshotTask('camera-main'));
     httpMock.expectOne('/api/harbor-beacon/cameras/camera-main/snapshot').flush({ task_id: 'task-1' });
     expect(await snapshotPromise).toEqual({ task_id: 'task-1' });

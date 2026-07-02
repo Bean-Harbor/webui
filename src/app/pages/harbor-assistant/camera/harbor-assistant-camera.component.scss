@@ -156,6 +156,15 @@
   border-color: var(--primary);
 }
 
+.stream-profile-toggle {
+  justify-self: start;
+  max-width: 100%;
+}
+
+.stream-profile-toggle .mat-button-toggle {
+  min-width: 112px;
+}
+
 .dvr-preview-row {
   align-items: start;
   display: grid;

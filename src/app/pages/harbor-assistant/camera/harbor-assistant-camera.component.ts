@@ -47,6 +47,7 @@ interface HarborAssistantSearchPromptSuggestion {
 
 type HarborAssistantSearchLocalMediaStatus = 'archiving' | 'archive_failed' | 'finalizing';
 type HarborAssistantSearchRecordIntent = 'starting' | 'finalizing';
+type HarborAssistantLiveStreamProfile = 'sub' | 'main';
 
 interface HarborAssistantSearchMediaItem extends HarborAssistantSearchDvrTimelineSegment {
   local_preview_url?: string;
@@ -144,6 +145,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   protected readonly hlsLiveSession = signal<HarborAssistantCameraLiveSessionResponse | null>(null);
   protected readonly hlsLiveStatus = signal<'stopped' | 'starting' | 'live' | 'degraded'>('stopped');
   protected readonly hlsLiveError = signal<string | null>(null);
+  protected readonly selectedStreamProfile = signal<HarborAssistantLiveStreamProfile>('sub');
   protected readonly actionBusy = signal<string | null>(null);
   protected readonly actionMessage = signal<string | null>(null);
   protected readonly actionError = signal<string | null>(null);
@@ -259,6 +261,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
             ? defaultSelection
             : fallbackSelection;
         this.cameras.set(devices);
+        if (selected !== currentSelection) {
+          this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(selected));
+        }
         this.selectedCameraId.set(selected);
         this.dvrStatuses.set(dvr.statuses ?? []);
         this.loadDvrTimeline(selected, refreshErrors);
@@ -273,6 +278,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   selectCamera(deviceId: string): void {
     if (deviceId !== this.selectedCameraId()) {
       this.stopLive(false);
+      this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(deviceId));
     }
     this.selectedCameraId.set(deviceId);
     this.liveMjpegFailed.set(false);
@@ -280,6 +286,20 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.lastGoodLiveFrameUrl.set(null);
     this.selectedMediaItem.set(null);
     this.refreshCameraDvr();
+  }
+
+  selectStreamProfile(profile: HarborAssistantLiveStreamProfile): void {
+    if (profile !== 'sub' && profile !== 'main') {
+      return;
+    }
+    if (profile === this.selectedStreamProfile()) {
+      return;
+    }
+    if (this.hlsLiveStatus() === 'live' || this.hlsLiveStatus() === 'starting') {
+      this.stopLive(false);
+      this.showLiveFeedback('Stream changed. Press Play live to start it.', 1800);
+    }
+    this.selectedStreamProfile.set(profile);
   }
 
   usePromptSuggestion(suggestion: HarborAssistantSearchPromptSuggestion): void {
@@ -546,7 +566,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsPlaybackToken += 1;
     this.hlsRecoveryAttempts = 0;
     this.stopHlsPlayback();
-    this.api.startCameraLiveSession(deviceId).pipe(
+    this.api.startCameraLiveSession(deviceId, this.selectedStreamProfile()).pipe(
       finalize(() => {
         if (this.actionBusy() === 'live') {
           this.actionBusy.set(null);
@@ -554,6 +574,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       }),
     ).subscribe({
       next: (session) => {
+        this.applySessionStreamProfile(session);
         this.hlsLiveSession.set(session);
         if (session.session_id) {
           this.showLiveFeedback('Live is starting...', 1800);
@@ -585,6 +606,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         if (this.hlsLiveSession()?.session_id !== sessionId) {
           return;
         }
+        this.applySessionStreamProfile(status);
         this.hlsLiveSession.set(status);
         if (status.playlist_ready && status.playlist_url) {
           this.hlsLiveUrl.set(harborAssistantSearchSameOriginAdminUrl(status.playlist_url));
@@ -652,15 +674,36 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   liveModeLabel(): string {
     if (this.hlsLiveStatus() === 'live') {
-      return 'Live H.264';
+      return `Live H.264 ${this.selectedStreamProfile()}`;
     }
     if (this.hlsLiveStatus() === 'starting') {
-      return 'Starting live';
+      return `Starting ${this.selectedStreamProfile()} stream`;
     }
     if (this.hlsLiveStatus() === 'degraded') {
       return 'Snapshot fallback';
     }
     return 'Stopped';
+  }
+
+  private applySessionStreamProfile(session: HarborAssistantCameraLiveSessionResponse): void {
+    const profile = this.normalizeLiveStreamProfile(session.stream_profile);
+    if (profile) {
+      this.selectedStreamProfile.set(profile);
+    }
+  }
+
+  private normalizeLiveStreamProfile(profile: string | null | undefined): HarborAssistantLiveStreamProfile | null {
+    if (profile === 'sub' || profile === 'main') {
+      return profile;
+    }
+    return null;
+  }
+
+  private defaultStreamProfileForCamera(deviceId: string | null | undefined): HarborAssistantLiveStreamProfile {
+    if (deviceId?.toLowerCase().includes('main')) {
+      return 'main';
+    }
+    return 'sub';
   }
 
   liveCanStart(): boolean {

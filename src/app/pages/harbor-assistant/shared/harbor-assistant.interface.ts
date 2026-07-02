@@ -112,6 +112,7 @@ export interface HarborAssistantCameraLiveSessionResponse {
   playlist_ready: boolean;
   mode: string;
   codec: string;
+  stream_profile?: 'sub' | 'main' | string;
   started_at?: string | null;
   updated_at: string;
   message?: string | null;

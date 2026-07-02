@@ -43,6 +43,15 @@
                 </button>
               }
             </div>
+            <mat-button-toggle-group
+              class="stream-profile-toggle"
+              [value]="selectedStreamProfile()"
+              aria-label="Live stream profile"
+              (valueChange)="selectStreamProfile($any($event))"
+            >
+              <mat-button-toggle value="sub">{{ 'Sub stream' | translate }}</mat-button-toggle>
+              <mat-button-toggle value="main">{{ 'Main stream' | translate }}</mat-button-toggle>
+            </mat-button-toggle-group>
 
             <div class="dvr-preview-row">
               <div class="live-stack">
