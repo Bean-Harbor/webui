@@ -2,6 +2,7 @@ import { fakeAsync, tick, discardPeriodicTasks, flushMicrotasks } from '@angular
 import { createComponentFactory, Spectator } from '@ngneat/spectator/jest';
 import { MockComponent } from 'ng-mocks';
 import { of, Subject, throwError } from 'rxjs';
+import Hls from 'hls.js';
 import { PageHeaderComponent } from 'app/modules/page-header/page-title-header/page-header.component';
 import { HarborAssistantCameraComponent } from 'app/pages/harbor-assistant/camera/harbor-assistant-camera.component';
 import {
@@ -115,6 +116,45 @@ describe('Harbor Assistant camera component', () => {
     expect(componentState.hlsLiveError()).toBe(
       'Browser paused live playback. Press the video play control.',
     );
+    discardPeriodicTasks();
+  }));
+
+  it('prefers hls.js when native HLS probing is unreliable', fakeAsync(() => {
+    spectator = createComponent();
+    const playlistUrl = '/api/beacon/cameras/cam-1/live/live-test/index.m3u8';
+    const isSupported = jest.spyOn(Hls, 'isSupported').mockReturnValue(true);
+    const loadSource = jest.spyOn(Hls.prototype, 'loadSource').mockImplementation(jest.fn());
+    const attachMedia = jest.spyOn(Hls.prototype, 'attachMedia').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'on').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'destroy').mockImplementation(jest.fn());
+    const componentState = spectator.component as unknown as {
+      attachHlsPlayback: () => boolean;
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+    };
+    const video = {
+      autoplay: false,
+      canPlayType: jest.fn(() => 'maybe'),
+      currentTime: 0,
+      load: jest.fn(),
+      muted: false,
+      pause: jest.fn(),
+      paused: true,
+      play: jest.fn(() => Promise.resolve()),
+      playsInline: false,
+      removeAttribute: jest.fn(),
+    } as unknown as HTMLVideoElement;
+    componentState.hlsLiveUrl.set(playlistUrl);
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: video };
+
+    expect(componentState.attachHlsPlayback()).toBe(true);
+
+    expect(isSupported).toHaveBeenCalled();
+    expect(loadSource).toHaveBeenCalledWith(playlistUrl);
+    expect(attachMedia).toHaveBeenCalledWith(video);
+    expect(video.canPlayType).not.toHaveBeenCalled();
     discardPeriodicTasks();
   }));
 

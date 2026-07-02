@@ -1446,41 +1446,42 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return false;
     }
     this.stopHlsPlayback();
+    video.autoplay = true;
     video.muted = true;
     video.playsInline = true;
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        backBufferLength: 30,
+        lowLatencyMode: true,
+      });
+      this.hls = hls;
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (!data.fatal) {
+          return;
+        }
+        this.hlsLiveStatus.set('degraded');
+        this.hlsLiveError.set('Live HLS playback failed. Snapshot fallback is still available.');
+        this.stopHlsPlayback();
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        this.hlsLiveStatus.set('live');
+        this.scheduleLiveVideoPlayback();
+      });
+      hls.on(Hls.Events.FRAG_BUFFERED, () => {
+        this.scheduleLiveVideoPlayback();
+      });
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      return true;
+    }
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = url;
       video.load();
       this.scheduleLiveVideoPlayback();
       return true;
     }
-    if (!Hls.isSupported()) {
-      this.hlsLiveStatus.set('degraded');
-      this.hlsLiveError.set('This browser cannot play local HLS live video.');
-      return true;
-    }
-    const hls = new Hls({
-      backBufferLength: 30,
-      lowLatencyMode: true,
-    });
-    this.hls = hls;
-    hls.on(Hls.Events.ERROR, (_event, data) => {
-      if (!data.fatal) {
-        return;
-      }
-      this.hlsLiveStatus.set('degraded');
-      this.hlsLiveError.set('Live HLS playback failed. Snapshot fallback is still available.');
-      this.stopHlsPlayback();
-    });
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      this.hlsLiveStatus.set('live');
-      this.scheduleLiveVideoPlayback();
-    });
-    hls.on(Hls.Events.FRAG_BUFFERED, () => {
-      this.scheduleLiveVideoPlayback();
-    });
-    hls.loadSource(url);
-    hls.attachMedia(video);
+    this.hlsLiveStatus.set('degraded');
+    this.hlsLiveError.set('This browser cannot play local HLS live video.');
     return true;
   }
 
