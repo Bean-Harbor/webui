@@ -15,8 +15,6 @@ if [[ "${HARBORNAVI_WEBUI_SKIP_BUILD:-0}" != "1" ]]; then
   yarn build:harbornavi-k3
 fi
 
-rm -f "$dist_dir/sw.js"
-
 rm -rf "$package_root"
 mkdir -p \
   "$package_root/DEBIAN" \
