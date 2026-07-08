@@ -139,10 +139,33 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('does not remute user-unmuted HLS live playback during resume', fakeAsync(() => {
+    spectator = createComponent();
+    const video = fakeLiveVideo({
+      currentTime: 4,
+      muted: false,
+      paused: false,
+    });
+    const componentState = spectator.component as unknown as {
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+    };
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: video };
+
+    spectator.component.resumeLivePlayback();
+    tick();
+
+    expect(video.muted).toBe(false);
+    discardPeriodicTasks();
+  }));
+
   it('moves stale HLS playback back with enough live buffer', fakeAsync(() => {
     spectator = createComponent();
     const video = fakeLiveVideo({
-      currentTime: 12,
+      currentTime: 8,
       paused: false,
       playbackRate: 1,
       seekable: {
@@ -163,7 +186,7 @@ describe('Harbor Assistant camera component', () => {
 
     componentState.seekLiveVideoToEdge();
 
-    expect(video.currentTime).toBeCloseTo(26.5);
+    expect(video.currentTime).toBeCloseTo(22);
     expect(video.playbackRate).toBe(1);
     discardPeriodicTasks();
   }));
@@ -171,7 +194,7 @@ describe('Harbor Assistant camera component', () => {
   it('avoids force seeking when HLS playback is close enough to live', fakeAsync(() => {
     spectator = createComponent();
     const video = fakeLiveVideo({
-      currentTime: 23,
+      currentTime: 18,
       paused: false,
       playbackRate: 1,
       seekable: {
@@ -188,7 +211,7 @@ describe('Harbor Assistant camera component', () => {
 
     componentState.seekLiveVideoToEdge();
 
-    expect(video.currentTime).toBe(23);
+    expect(video.currentTime).toBe(18);
     expect(video.playbackRate).toBe(1.05);
     discardPeriodicTasks();
   }));
@@ -226,6 +249,7 @@ describe('Harbor Assistant camera component', () => {
     expect(componentState.attachHlsPlayback()).toBe(true);
 
     expect(isSupported).toHaveBeenCalled();
+    expect(video.muted).toBe(true);
     expect(loadSource).toHaveBeenCalledWith(playlistUrl);
     expect(attachMedia).toHaveBeenCalledWith(video);
     expect(video.canPlayType).not.toHaveBeenCalled();
@@ -270,6 +294,59 @@ describe('Harbor Assistant camera component', () => {
     expect(recoverMediaError).toHaveBeenCalled();
     expect(componentState.hlsLiveStatus()).toBe('live');
     expect(componentState.hlsLiveError()).toBe('Live HLS media error; retrying (mediaError/bufferAppendError).');
+    tick();
+    discardPeriodicTasks();
+  }));
+
+  it('degrades expired HLS live sessions without recovery loops', fakeAsync(() => {
+    spectator = createComponent();
+    const playlistUrl = '/api/beacon/cameras/cam-1/live/live-test/index.m3u8';
+    const hlsHandlers = new Map<string, (event: string, data: {
+      details: string;
+      fatal: boolean;
+      response?: { code: number };
+      type: string;
+    }) => void>();
+    const startLoad = jest.spyOn(Hls.prototype, 'startLoad').mockImplementation(jest.fn());
+    jest.spyOn(Hls, 'isSupported').mockReturnValue(true);
+    jest.spyOn(Hls.prototype, 'loadSource').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'attachMedia').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'destroy').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'on').mockImplementation((event, handler) => {
+      hlsHandlers.set(
+        event,
+        handler as (event: string, data: {
+          details: string;
+          fatal: boolean;
+          response?: { code: number };
+          type: string;
+        }) => void,
+      );
+    });
+    const componentState = spectator.component as unknown as {
+      attachHlsPlayback: () => boolean;
+      hlsLiveError: () => string | null;
+      hlsLiveStatus: {
+        set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void;
+      } & (() => string);
+      hlsLiveUrl: { set: (value: string | null) => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+    };
+    componentState.hlsLiveUrl.set(playlistUrl);
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: fakeLiveVideo() };
+
+    expect(componentState.attachHlsPlayback()).toBe(true);
+    hlsHandlers.get(Hls.Events.ERROR)?.('hlsError', {
+      details: 'fragLoadError',
+      fatal: true,
+      response: { code: 404 },
+      type: 'networkError',
+    });
+
+    expect(startLoad).not.toHaveBeenCalled();
+    expect(componentState.hlsLiveStatus()).toBe('degraded');
+    expect(componentState.hlsLiveError()).toBe('Live session expired. Start live playback again.');
     tick();
     discardPeriodicTasks();
   }));

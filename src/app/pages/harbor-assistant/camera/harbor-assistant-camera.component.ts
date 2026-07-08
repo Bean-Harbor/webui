@@ -163,8 +163,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsRecoveryAttempts = 0;
   private liveEdgeMonitor: number | null = null;
   private hls: Hls | null = null;
-  private readonly liveEdgeBackoffSeconds = 3.5;
-  private readonly liveEdgeMaxDriftSeconds = 10;
+  private readonly liveEdgeBackoffSeconds = 8;
+  private readonly liveEdgeMaxDriftSeconds = 20;
 
   ngOnInit(): void {
     this.refreshCameraDvr();
@@ -1501,17 +1501,23 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     video.playsInline = true;
     if (Hls.isSupported()) {
       const hls = new Hls({
-        backBufferLength: 10,
-        lowLatencyMode: true,
-        liveSyncDurationCount: 4,
-        liveMaxLatencyDurationCount: 8,
-        maxBufferLength: 8,
-        maxMaxBufferLength: 12,
-        maxLiveSyncPlaybackRate: 1.08,
+        backBufferLength: 20,
+        lowLatencyMode: false,
+        liveSyncDurationCount: 5,
+        liveMaxLatencyDurationCount: 10,
+        maxBufferLength: 24,
+        maxMaxBufferLength: 30,
+        maxLiveSyncPlaybackRate: 1.04,
       });
       this.hls = hls;
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal) {
+          return;
+        }
+        if (this.isExpiredHlsAssetError(data)) {
+          this.hlsLiveStatus.set('degraded');
+          this.hlsLiveError.set('Live session expired. Start live playback again.');
+          this.stopHlsPlayback();
           return;
         }
         if (this.recoverHlsPlayback(hls, data)) {
@@ -1530,7 +1536,6 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         this.scheduleLiveVideoPlayback();
       });
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
-        this.seekLiveVideoToEdge();
         this.scheduleLiveVideoPlayback();
       });
       hls.loadSource(url);
@@ -1571,6 +1576,18 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     return false;
   }
 
+  private isExpiredHlsAssetError(data: { response?: unknown; type?: unknown }): boolean {
+    if (data.type !== 'networkError') {
+      return false;
+    }
+    const response = data.response;
+    if (!response || typeof response !== 'object') {
+      return false;
+    }
+    const code = (response as { code?: unknown }).code;
+    return code === 404 || code === 410;
+  }
+
   private describeHlsError(data: { details?: unknown; error?: unknown; type?: unknown }): string {
     const type = typeof data.type === 'string' && data.type.trim() ? data.type.trim() : 'unknown';
     const details = typeof data.details === 'string' && data.details.trim() ? data.details.trim() : 'unknown';
@@ -1602,9 +1619,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       if (!video) {
         return;
       }
-      video.muted = true;
       video.playsInline = true;
-      this.seekLiveVideoToEdge();
       if (!video.paused && video.currentTime > 0) {
         this.hlsLiveError.set(null);
         return;
@@ -1644,7 +1659,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         return;
       }
       this.seekLiveVideoToEdge();
-    }, 1200);
+    }, 2500);
   }
 
   private stopLiveEdgeMonitor(): void {
