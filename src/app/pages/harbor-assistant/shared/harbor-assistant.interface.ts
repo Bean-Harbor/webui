@@ -116,6 +116,14 @@ export interface HarborAssistantCameraLiveSessionResponse {
   started_at?: string | null;
   updated_at: string;
   message?: string | null;
+  diagnostics?: {
+    playlist_exists: boolean;
+    segment_count: number;
+    latest_segment_name?: string | null;
+    latest_segment_size_bytes?: number | null;
+    latest_segment_modified_at?: string | null;
+    ffmpeg_running: boolean;
+  } | null;
 }
 
 export interface HarborAssistantSearchDvrTimelineSegment {

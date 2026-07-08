@@ -169,7 +169,7 @@ describe('Harbor Assistant camera component', () => {
       paused: false,
       playbackRate: 1,
       seekable: {
-        end: jest.fn(() => 30),
+        end: jest.fn(() => 60),
         length: 1,
         start: jest.fn(() => 0),
       } as unknown as TimeRanges,
@@ -186,7 +186,7 @@ describe('Harbor Assistant camera component', () => {
 
     componentState.seekLiveVideoToEdge();
 
-    expect(video.currentTime).toBeCloseTo(22);
+    expect(video.currentTime).toBeCloseTo(45);
     expect(video.playbackRate).toBe(1);
     discardPeriodicTasks();
   }));
@@ -194,11 +194,11 @@ describe('Harbor Assistant camera component', () => {
   it('avoids force seeking when HLS playback is close enough to live', fakeAsync(() => {
     spectator = createComponent();
     const video = fakeLiveVideo({
-      currentTime: 18,
+      currentTime: 38,
       paused: false,
       playbackRate: 1,
       seekable: {
-        end: jest.fn(() => 30),
+        end: jest.fn(() => 60),
         length: 1,
         start: jest.fn(() => 0),
       } as unknown as TimeRanges,
@@ -211,7 +211,7 @@ describe('Harbor Assistant camera component', () => {
 
     componentState.seekLiveVideoToEdge();
 
-    expect(video.currentTime).toBe(18);
+    expect(video.currentTime).toBe(38);
     expect(video.playbackRate).toBe(1.05);
     discardPeriodicTasks();
   }));

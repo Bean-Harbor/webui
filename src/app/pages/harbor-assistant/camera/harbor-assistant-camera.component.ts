@@ -163,8 +163,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsRecoveryAttempts = 0;
   private liveEdgeMonitor: number | null = null;
   private hls: Hls | null = null;
-  private readonly liveEdgeBackoffSeconds = 8;
-  private readonly liveEdgeMaxDriftSeconds = 20;
+  private readonly liveEdgeBackoffSeconds = 15;
+  private readonly liveEdgeMaxDriftSeconds = 36;
 
   ngOnInit(): void {
     this.refreshCameraDvr();
@@ -1501,12 +1501,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     video.playsInline = true;
     if (Hls.isSupported()) {
       const hls = new Hls({
-        backBufferLength: 20,
+        backBufferLength: 30,
         lowLatencyMode: false,
-        liveSyncDurationCount: 5,
-        liveMaxLatencyDurationCount: 10,
-        maxBufferLength: 24,
-        maxMaxBufferLength: 30,
+        liveSyncDurationCount: 6,
+        liveMaxLatencyDurationCount: 12,
+        maxBufferLength: 45,
+        maxMaxBufferLength: 60,
         maxLiveSyncPlaybackRate: 1.04,
       });
       this.hls = hls;
@@ -1684,7 +1684,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       video.playbackRate = 1;
       return;
     }
-    video.playbackRate = driftSeconds > this.liveEdgeBackoffSeconds + 3 ? 1.05 : 1;
+    video.playbackRate = driftSeconds > this.liveEdgeBackoffSeconds + 4 ? 1.05 : 1;
   }
 
   private liveVideoEdgeSeconds(video: HTMLVideoElement): number | null {

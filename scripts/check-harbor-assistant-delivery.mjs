@@ -81,6 +81,7 @@ for (const required of [
   'Package: $package_name',
   '/usr/share/harbornavi/webui',
   '/etc/nginx/conf.d/harbornavi-webui.conf',
+  'location ~ ^/api/beacon-live/cameras/',
   'location /api/beacon/',
   'proxy_pass http://127.0.0.1:4174',
   'location /api/harbor-gate/',

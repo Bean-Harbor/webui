@@ -8,14 +8,29 @@ package_name="harbornavi-assistant-webui"
 version="${HARBORNAVI_WEBUI_VERSION:-$(date +%Y%m%d)}"
 artifact_root="${HARBORNAVI_WEBUI_ARTIFACT_ROOT:-$repo_root/dist/harbornavi-k3-package}"
 dist_dir="${HARBORNAVI_WEBUI_DIST_DIR:-$repo_root/dist}"
-package_root="$artifact_root/${package_name}_${version}_all"
+package_work_parent="${HARBORNAVI_WEBUI_PACKAGE_WORK_ROOT:-${TMPDIR:-/tmp}}"
+if [[ "$package_work_parent" =~ ^/mnt/[[:alpha:]](/|$) ]]; then
+  echo "warning: HARBORNAVI_WEBUI_PACKAGE_WORK_ROOT is on a Windows mount; using /tmp for dpkg work files" >&2
+  package_work_parent="/tmp"
+fi
+mkdir -p "$package_work_parent"
+if [[ "$artifact_root" != "$dist_dir" && "$artifact_root" == "$dist_dir"/* ]]; then
+  rm -rf "$artifact_root"
+fi
+package_work_root="$(mktemp -d "${package_work_parent%/}/harbornavi-webui-package.XXXXXX")"
+package_root="$package_work_root/${package_name}_${version}_all"
 deb_path="$artifact_root/${package_name}_${version}_all.deb"
+
+cleanup_package_work_root() {
+  rm -rf "$package_work_root"
+}
+
+trap cleanup_package_work_root EXIT
 
 if [[ "${HARBORNAVI_WEBUI_SKIP_BUILD:-0}" != "1" ]]; then
   yarn build:harbornavi-k3
 fi
 
-rm -rf "$package_root"
 mkdir -p \
   "$package_root/DEBIAN" \
   "$package_root/etc/nginx/conf.d" \
@@ -23,6 +38,8 @@ mkdir -p \
 chmod 0755 "$package_root" "$package_root/DEBIAN"
 
 cp -a "$dist_dir/." "$package_root/usr/share/harbornavi/webui/"
+find "$package_root/usr/share/harbornavi/webui" -type d -exec chmod 0755 {} +
+find "$package_root/usr/share/harbornavi/webui" -type f -exec chmod 0644 {} +
 
 cat > "$package_root/DEBIAN/control" <<CONTROL
 Package: $package_name
@@ -35,6 +52,7 @@ Depends: nginx, ca-certificates
 Description: HarborNavi K3 Harbor Assistant WebUI
  Static Harbor Assistant WebUI build for HarborNavi on K3/Bianbu.
 CONTROL
+chmod 0644 "$package_root/DEBIAN/control"
 
 cat > "$package_root/etc/nginx/conf.d/harbornavi-webui.conf" <<'NGINX'
 server {
@@ -71,6 +89,23 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
+    location ~ ^/api/beacon-live/cameras/([A-Za-z0-9_.-]+)/live/(live-[A-Za-z0-9]+)/(index\.m3u8|init\.mp4|segment_[0-9][0-9][0-9][0-9][0-9]\.m4s)$ {
+        alias /run/harbornavi/live/$1/$2/$3;
+        autoindex off;
+        types {
+            application/vnd.apple.mpegurl m3u8;
+            video/mp4 mp4;
+            video/iso.segment m4s;
+        }
+        default_type application/octet-stream;
+        add_header Cache-Control "no-store";
+        add_header X-Content-Type-Options "nosniff";
+    }
+
+    location /api/beacon-live/ {
+        return 404;
+    }
+
     location /api/beacon/ {
         proxy_pass http://127.0.0.1:4174;
         proxy_http_version 1.1;
@@ -103,6 +138,7 @@ server {
     }
 }
 NGINX
+chmod 0644 "$package_root/etc/nginx/conf.d/harbornavi-webui.conf"
 
 cat > "$package_root/DEBIAN/postinst" <<'POSTINST'
 #!/usr/bin/env bash
@@ -116,6 +152,7 @@ POSTINST
 chmod 0755 "$package_root/DEBIAN/postinst"
 
 find "$package_root" -type d -exec chmod a-s,u=rwx,go=rx {} +
+mkdir -p "$artifact_root"
 dpkg-deb --build "$package_root" "$deb_path"
 sha256sum "$deb_path" > "$deb_path.sha256"
 
