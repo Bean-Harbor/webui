@@ -74,14 +74,14 @@
                     <video
                       #liveVideo
                       controls
-                      autoplay
                       muted
                       playsinline
                       preload="auto"
                       [attr.aria-label]="selectedCamera()?.name || selectedCameraId() || 'camera'"
                       (loadeddata)="resumeLivePlayback()"
                       (canplay)="resumeLivePlayback()"
-                      (click)="resumeLivePlayback()"
+                      (pause)="onLiveVideoPause()"
+                      (play)="onLiveVideoPlay()"
                     ></video>
                   } @else if (selectedLiveUrl(); as liveUrl) {
                     <img
