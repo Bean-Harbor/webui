@@ -83,6 +83,7 @@
                       (canplay)="resumeLivePlayback()"
                       (pause)="onLiveVideoPause()"
                       (play)="onLiveVideoPlay()"
+                      (seeked)="onLiveVideoSeeked()"
                     ></video>
                   } @else if (selectedLiveUrl(); as liveUrl) {
                     <img

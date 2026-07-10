@@ -163,13 +163,15 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsRecoveryAttempts = 0;
   private livePlaybackUserPaused = false;
   private livePlaybackUserDelayed = false;
-  private pausedLiveCurrentTimeSeconds: number | null = null;
+  private userLivePlaybackAnchorSeconds: number | null = null;
   private pendingProgrammaticLivePlayCount = 0;
   private suppressLivePauseEvent = false;
+  private programmaticLiveSeekTargetSeconds: number | null = null;
   private liveEdgeMonitor: number | null = null;
   private hls: Hls | null = null;
   private readonly liveEdgeBackoffSeconds = 6;
   private readonly liveEdgeMaxDriftSeconds = 18;
+  private readonly liveEdgeReturnToleranceSeconds = 1;
   private readonly livePausedTimeDriftToleranceSeconds = 0.2;
   private readonly hlsPlaylistPollIntervalMs = 500;
   private readonly hlsPlaylistMaxWaitMs = 45_000;
@@ -748,7 +750,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     this.livePlaybackUserPaused = true;
     this.livePlaybackUserDelayed = true;
-    this.pausedLiveCurrentTimeSeconds = this.liveVideo?.nativeElement.currentTime ?? null;
+    this.userLivePlaybackAnchorSeconds = this.normalizedLiveVideoCurrentTime();
     this.hlsPlaybackToken += 1;
     this.hlsLiveError.set(null);
   }
@@ -764,12 +766,40 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       }
       return;
     }
+    const shouldRestoreUserAnchor = this.livePlaybackUserPaused && this.livePlaybackUserDelayed;
     this.livePlaybackUserPaused = false;
-    this.livePlaybackUserDelayed = false;
-    this.pausedLiveCurrentTimeSeconds = null;
     if (video) {
+      if (shouldRestoreUserAnchor) {
+        this.restoreUserLivePlaybackAnchor(video);
+      }
       video.playbackRate = 1;
     }
+    this.hlsLiveError.set(null);
+  }
+
+  onLiveVideoSeeked(): void {
+    if (!this.hlsLiveUrl() || this.hlsLiveStatus() !== 'live') {
+      return;
+    }
+    const video = this.liveVideo?.nativeElement;
+    if (!video || !Number.isFinite(video.currentTime)) {
+      return;
+    }
+    if (this.consumeProgrammaticLiveSeek(video)) {
+      return;
+    }
+    const liveEdge = this.liveVideoEdgeSeconds(video);
+    if (liveEdge !== null && this.liveVideoIsAtLiveEdge(video, liveEdge)) {
+      this.resetLivePlaybackUserPause();
+      video.playbackRate = 1;
+      this.hlsLiveError.set(null);
+      return;
+    }
+    this.livePlaybackUserPaused = video.paused;
+    this.livePlaybackUserDelayed = true;
+    this.userLivePlaybackAnchorSeconds = video.currentTime;
+    this.hlsPlaybackToken += 1;
+    video.playbackRate = 1;
     this.hlsLiveError.set(null);
   }
 
@@ -1619,8 +1649,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         this.scheduleLiveVideoPlayback();
       });
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
-        this.restorePausedLivePosition();
-        this.scheduleLiveVideoPlayback();
+        if (this.livePlaybackUserPaused) {
+          this.restoreUserLivePlaybackAnchor();
+        }
+        if (!this.livePlaybackUserDelayed) {
+          this.scheduleLiveVideoPlayback();
+        }
       });
       hls.loadSource(url);
       hls.attachMedia(video);
@@ -1685,7 +1719,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     url = this.hlsLiveUrl(),
     token = this.hlsPlaybackToken + 1,
   ): void {
-    if (!url || this.livePlaybackUserPaused) {
+    if (!url || this.livePlaybackUserPaused || this.livePlaybackUserDelayed) {
       return;
     }
     if (attempt === 0) {
@@ -1772,8 +1806,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (!video || liveEdge === null) {
       return;
     }
-    if (this.livePlaybackUserPaused || this.livePlaybackUserDelayed) {
-      this.restorePausedLivePosition(video);
+    if (this.livePlaybackUserPaused) {
+      this.restoreUserLivePlaybackAnchor(video);
+      video.playbackRate = 1;
+      return;
+    }
+    if (this.livePlaybackUserDelayed) {
       video.playbackRate = 1;
       return;
     }
@@ -1781,7 +1819,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const targetTime = Math.max(0, liveEdge - this.liveEdgeBackoffSeconds);
     const driftSeconds = liveEdge - video.currentTime;
     if (force || driftSeconds > this.liveEdgeMaxDriftSeconds) {
-      video.currentTime = targetTime;
+      this.setLiveVideoCurrentTime(video, targetTime);
       video.playbackRate = 1;
       return;
     }
@@ -1791,8 +1829,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private resetLivePlaybackUserPause(): void {
     this.livePlaybackUserPaused = false;
     this.livePlaybackUserDelayed = false;
-    this.pausedLiveCurrentTimeSeconds = null;
+    this.userLivePlaybackAnchorSeconds = null;
     this.pendingProgrammaticLivePlayCount = 0;
+    this.programmaticLiveSeekTargetSeconds = null;
   }
 
   private hasPendingProgrammaticLivePlayRequest(): boolean {
@@ -1813,20 +1852,20 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
   }
 
-  private restorePausedLivePosition(video = this.liveVideo?.nativeElement): void {
-    const pausedTime = this.pausedLiveCurrentTimeSeconds;
-    if (!video || pausedTime === null || !Number.isFinite(pausedTime)) {
+  private restoreUserLivePlaybackAnchor(video = this.liveVideo?.nativeElement): void {
+    const anchorTime = this.userLivePlaybackAnchorSeconds;
+    if (!video || anchorTime === null || !Number.isFinite(anchorTime)) {
       return;
     }
-    if (Math.abs(video.currentTime - pausedTime) <= this.livePausedTimeDriftToleranceSeconds) {
+    if (Math.abs(video.currentTime - anchorTime) <= this.livePausedTimeDriftToleranceSeconds) {
       return;
     }
-    const pausedTimeAvailable = this.liveTimeRangeContains(video.seekable, pausedTime)
-      || this.liveTimeRangeContains(video.buffered, pausedTime);
-    if (!pausedTimeAvailable) {
+    const anchorTimeAvailable = this.liveTimeRangeContains(video.seekable, anchorTime)
+      || this.liveTimeRangeContains(video.buffered, anchorTime);
+    if (!anchorTimeAvailable) {
       return;
     }
-    video.currentTime = pausedTime;
+    this.setLiveVideoCurrentTime(video, anchorTime);
   }
 
   private liveVideoEdgeSeconds(video: HTMLVideoElement): number | null {
@@ -1836,6 +1875,29 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     const liveEdge = seekable.end(seekable.length - 1);
     return Number.isFinite(liveEdge) ? liveEdge : null;
+  }
+
+  private liveVideoIsAtLiveEdge(video: HTMLVideoElement, liveEdge: number): boolean {
+    return liveEdge - video.currentTime <= this.liveEdgeReturnToleranceSeconds;
+  }
+
+  private normalizedLiveVideoCurrentTime(): number | null {
+    const currentTime = this.liveVideo?.nativeElement.currentTime;
+    return typeof currentTime === 'number' && Number.isFinite(currentTime) ? currentTime : null;
+  }
+
+  private setLiveVideoCurrentTime(video: HTMLVideoElement, seconds: number): void {
+    this.programmaticLiveSeekTargetSeconds = seconds;
+    video.currentTime = seconds;
+  }
+
+  private consumeProgrammaticLiveSeek(video: HTMLVideoElement): boolean {
+    const targetTime = this.programmaticLiveSeekTargetSeconds;
+    if (targetTime === null) {
+      return false;
+    }
+    this.programmaticLiveSeekTargetSeconds = null;
+    return Math.abs(video.currentTime - targetTime) <= this.livePausedTimeDriftToleranceSeconds;
   }
 
   private liveTimeRangeContains(ranges: TimeRanges | undefined, seconds: number): boolean {
