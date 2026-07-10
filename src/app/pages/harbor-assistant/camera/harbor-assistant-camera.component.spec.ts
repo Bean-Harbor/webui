@@ -500,6 +500,77 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('keeps the user-selected delayed HLS playback rate while catching up', fakeAsync(() => {
+    spectator = createComponent();
+    const bufferedRange = fakeTimeRanges([[0, 90]]);
+    const video = fakeLiveVideo({
+      currentTime: 35,
+      paused: false,
+      playbackRate: 1,
+      buffered: bufferedRange,
+      seekable: bufferedRange,
+    });
+    const componentState = spectator.component as unknown as {
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoRateChange: () => void;
+      onLiveVideoSeeked: () => void;
+      seekLiveVideoToEdge: (force?: boolean) => void;
+    };
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: video };
+
+    componentState.onLiveVideoSeeked();
+    video.playbackRate = 2;
+    componentState.onLiveVideoRateChange();
+    video.currentTime = 60;
+    componentState.seekLiveVideoToEdge();
+
+    expect(video.currentTime).toBe(60);
+    expect(video.playbackRate).toBe(2);
+    discardPeriodicTasks();
+  }));
+
+  it('returns delayed HLS playback to normal rate after catching up to live edge', fakeAsync(() => {
+    spectator = createComponent();
+    const bufferedRange = fakeTimeRanges([[0, 90]]);
+    const video = fakeLiveVideo({
+      currentTime: 35,
+      paused: false,
+      playbackRate: 1,
+      buffered: bufferedRange,
+      seekable: bufferedRange,
+    });
+    const componentState = spectator.component as unknown as {
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoRateChange: () => void;
+      onLiveVideoSeeked: () => void;
+      seekLiveVideoToEdge: (force?: boolean) => void;
+    };
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: video };
+
+    componentState.onLiveVideoSeeked();
+    video.playbackRate = 2;
+    componentState.onLiveVideoRateChange();
+    video.currentTime = 89.5;
+    componentState.seekLiveVideoToEdge();
+
+    expect(video.playbackRate).toBe(1);
+
+    video.currentTime = 50;
+    componentState.seekLiveVideoToEdge(true);
+
+    expect(video.currentTime).toBe(84);
+    expect(video.playbackRate).toBe(1);
+    discardPeriodicTasks();
+  }));
+
   it('returns to live edge tracking when the user seeks to the right edge', fakeAsync(() => {
     spectator = createComponent();
     const bufferedRange = fakeTimeRanges([[0, 90]]);
