@@ -119,9 +119,14 @@ export interface HarborAssistantCameraLiveSessionResponse {
   diagnostics?: {
     playlist_exists: boolean;
     segment_count: number;
+    startup_elapsed_seconds?: number;
+    playlist_modified_at?: string | null;
+    playlist_created_after_seconds?: number | null;
     latest_segment_name?: string | null;
     latest_segment_size_bytes?: number | null;
     latest_segment_modified_at?: string | null;
+    latest_segment_created_after_seconds?: number | null;
+    ready_after_seconds?: number | null;
     ffmpeg_running: boolean;
   } | null;
 }

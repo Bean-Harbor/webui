@@ -79,8 +79,9 @@
                       playsinline
                       preload="auto"
                       [attr.aria-label]="selectedCamera()?.name || selectedCameraId() || 'camera'"
-                      (loadeddata)="resumeLivePlayback()"
+                      (loadeddata)="onLiveVideoLoadedData()"
                       (canplay)="resumeLivePlayback()"
+                      (playing)="onLiveVideoPlaying()"
                       (pause)="onLiveVideoPause()"
                       (play)="onLiveVideoPlay()"
                       (ratechange)="onLiveVideoRateChange()"
@@ -228,15 +229,41 @@
                 <p>{{ displayMediaTime(mediaItem) }}</p>
               </div>
               <div class="viewer-actions">
-                <button mat-stroked-button type="button" (click)="fullscreenMediaViewer()">{{ 'Fullscreen' | translate }}</button>
-                <button mat-stroked-button type="button" (click)="closeMediaPreview()">{{ 'Close' | translate }}</button>
+                <button
+                  mat-stroked-button
+                  type="button"
+                  [attr.aria-label]="'Fullscreen' | translate"
+                  [title]="'Fullscreen' | translate"
+                  (click)="fullscreenMediaViewer()"
+                >
+                  {{ 'Fullscreen' | translate }}
+                </button>
+                <button
+                  mat-stroked-button
+                  type="button"
+                  [attr.aria-label]="'Close' | translate"
+                  [title]="'Close' | translate"
+                  (click)="closeMediaPreview()"
+                >
+                  {{ 'Close' | translate }}
+                </button>
               </div>
             </header>
 
             @if (mediaKind(mediaItem) === 'snapshot') {
               <img [src]="mediaPlaybackUrl(mediaItem)" [alt]="selectedCameraLabel() + ' snapshot'" />
             } @else {
-              <video [src]="mediaPlaybackUrl(mediaItem)" controls autoplay playsinline preload="auto"></video>
+              <video
+                [src]="mediaPlaybackUrl(mediaItem)"
+                controls
+                autoplay
+                playsinline
+                preload="auto"
+                (seeking)="onPlaybackVideoSeeking($event)"
+                (seeked)="onPlaybackVideoSeeked($event)"
+                (loadedmetadata)="onPlaybackVideoReady($event)"
+                (canplay)="onPlaybackVideoReady($event)"
+              ></video>
             }
           </section>
         }

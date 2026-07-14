@@ -77,7 +77,20 @@ describe('Harbor Assistant camera component', () => {
     spectator.component.startLive();
 
     expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'sub');
-    expect(spectator.component.liveModeLabel()).toBe('Live H.264 sub');
+    expect(spectator.component.liveModeLabel()).toBe('Starting sub stream');
+    discardPeriodicTasks();
+  }));
+
+  it('prewarms the selected HLS live session without changing playback state', fakeAsync(() => {
+    spectator = createComponent();
+
+    tick(299);
+    expect(api.startCameraLiveSession).not.toHaveBeenCalled();
+
+    tick(1);
+
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'sub');
+    expect(spectator.component.liveModeLabel()).toBe('Stopped');
     discardPeriodicTasks();
   }));
 
@@ -93,7 +106,7 @@ describe('Harbor Assistant camera component', () => {
     spectator.component.startLive();
 
     expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'main');
-    expect(spectator.component.liveModeLabel()).toBe('Live H.264 main');
+    expect(spectator.component.liveModeLabel()).toBe('Starting main stream');
     discardPeriodicTasks();
   }));
 
@@ -120,6 +133,7 @@ describe('Harbor Assistant camera component', () => {
       hlsLiveError: () => string | null;
       hlsLiveStatus: () => 'stopped' | 'starting' | 'live' | 'degraded';
       liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoLoadedData: () => void;
     };
     componentState.liveVideo = { nativeElement: fakeLiveVideo() };
 
@@ -130,6 +144,9 @@ describe('Harbor Assistant camera component', () => {
     expect(componentState.hlsLiveError()).toBeNull();
 
     tick(1100);
+
+    expect(componentState.hlsLiveStatus()).toBe('starting');
+    componentState.onLiveVideoLoadedData();
 
     expect(componentState.hlsLiveStatus()).toBe('live');
     discardPeriodicTasks();
@@ -687,6 +704,40 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('keeps live starting until HLS media is buffered', fakeAsync(() => {
+    spectator = createComponent();
+    const playlistUrl = '/api/beacon/cameras/cam-1/live/live-test/index.m3u8';
+    const hlsHandlers = new Map<string, (event: string, data?: unknown) => void>();
+    jest.spyOn(Hls, 'isSupported').mockReturnValue(true);
+    jest.spyOn(Hls.prototype, 'loadSource').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'attachMedia').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'destroy').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'on').mockImplementation((event, handler) => {
+      hlsHandlers.set(event, handler as (event: string, data?: unknown) => void);
+    });
+    const componentState = spectator.component as unknown as {
+      attachHlsPlayback: () => boolean;
+      hlsLiveStatus: {
+        set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void;
+      } & (() => string);
+      hlsLiveUrl: { set: (value: string | null) => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+    };
+    componentState.hlsLiveUrl.set(playlistUrl);
+    componentState.hlsLiveStatus.set('starting');
+    componentState.liveVideo = { nativeElement: fakeLiveVideo() };
+
+    expect(componentState.attachHlsPlayback()).toBe(true);
+    hlsHandlers.get(Hls.Events.MANIFEST_PARSED)?.('manifestParsed');
+
+    expect(componentState.hlsLiveStatus()).toBe('starting');
+
+    hlsHandlers.get(Hls.Events.FRAG_BUFFERED)?.('fragBuffered');
+
+    expect(componentState.hlsLiveStatus()).toBe('live');
+    discardPeriodicTasks();
+  }));
+
   it('keeps HLS fragment buffering from overriding a user pause', fakeAsync(() => {
     spectator = createComponent();
     const playlistUrl = '/api/beacon/cameras/cam-1/live/live-test/index.m3u8';
@@ -961,6 +1012,23 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('restores the selected playback seek target when media readiness resets the video time', fakeAsync(() => {
+    spectator = createComponent();
+    spectator.detectChanges();
+    spectator.component.openReplay(spectator.component.timelineItems()[0]);
+    tick();
+
+    const video = playbackVideoElement(60);
+    video.currentTime = 12;
+    spectator.component.onPlaybackVideoSeeking(videoEvent('seeking', video));
+    video.currentTime = 0;
+
+    spectator.component.onPlaybackVideoReady(videoEvent('canplay', video));
+
+    expect(video.currentTime).toBe(12);
+    discardPeriodicTasks();
+  }));
+
   it('labels media library recordings as videos', fakeAsync(() => {
     spectator = createComponent();
     spectator.detectChanges();
@@ -1216,6 +1284,19 @@ function fakeLiveVideo(options: Partial<HTMLVideoElement> = {}): HTMLVideoElemen
     removeAttribute: jest.fn(),
     ...options,
   } as unknown as HTMLVideoElement;
+}
+
+function playbackVideoElement(duration: number): HTMLVideoElement {
+  const video = document.createElement('video');
+  Object.defineProperty(video, 'duration', { value: duration, configurable: true });
+  Object.defineProperty(video, 'seekable', { value: fakeTimeRanges([[0, duration]]), configurable: true });
+  return video;
+}
+
+function videoEvent(type: string, video: HTMLVideoElement): Event {
+  const event = new Event(type);
+  Object.defineProperty(event, 'target', { value: video, configurable: true });
+  return event;
 }
 
 function fakeTimeRanges(ranges: Array<readonly [number, number]>): TimeRanges {
