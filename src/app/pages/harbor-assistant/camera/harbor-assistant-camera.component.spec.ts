@@ -94,6 +94,40 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('starts HLS prewarm before the DVR status request completes', fakeAsync(() => {
+    const pendingDvrStatus = new Subject<HarborAssistantSearchDvrStatusResponse>();
+    api.dvrStatus = jest.fn(() => pendingDvrStatus.asObservable());
+    spectator = createComponent();
+
+    tick(300);
+
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'sub');
+
+    pendingDvrStatus.next(dvrStatus());
+    pendingDvrStatus.complete();
+    discardPeriodicTasks();
+  }));
+
+  it('reuses an in-flight HLS prewarm request when live playback starts', fakeAsync(() => {
+    const pendingStart = new Subject<HarborAssistantCameraLiveSessionResponse>();
+    api.startCameraLiveSession = jest.fn(() => pendingStart.asObservable());
+    spectator = createComponent();
+
+    tick(300);
+    spectator.component.startLive();
+
+    expect(api.startCameraLiveSession).toHaveBeenCalledTimes(1);
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'sub');
+
+    pendingStart.next(liveSession());
+    pendingStart.complete();
+    tick();
+
+    expect(api.stopCameraLiveSession).not.toHaveBeenCalled();
+    expect(spectator.component.liveModeLabel()).toBe('Starting sub stream');
+    discardPeriodicTasks();
+  }));
+
   it('starts the selected main HLS stream profile', fakeAsync(() => {
     spectator = createComponent();
     api.startCameraLiveSession = jest.fn(() => of(liveSession({ stream_profile: 'main' })));

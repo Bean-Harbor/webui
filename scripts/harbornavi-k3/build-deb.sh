@@ -57,7 +57,7 @@ chmod 0644 "$package_root/DEBIAN/control"
 cat > "$package_root/etc/nginx/conf.d/harbornavi-webui.conf" <<'NGINX'
 server {
     listen 80;
-    server_name 192.168.6.219 192.168.3.21 127.0.0.1 localhost;
+    server_name 192.168.6.219 192.168.3.21 192.168.3.70 127.0.0.1 localhost;
     server_tokens off;
 
     client_max_body_size 50m;

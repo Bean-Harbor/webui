@@ -9,11 +9,12 @@ import { MatDialog } from '@angular/material/dialog';
 import { MatProgressBar } from '@angular/material/progress-bar';
 import { MatTab, MatTabGroup } from '@angular/material/tabs';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
-import { forkJoin, of, timer } from 'rxjs';
-import { catchError, finalize } from 'rxjs/operators';
+import { forkJoin, Observable, of, timer } from 'rxjs';
+import { catchError, finalize, shareReplay, tap } from 'rxjs/operators';
 import Hls from 'hls.js';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantSearchCameraStateResponse,
   HarborAssistantSearchResultFilter,
   HarborAssistantSearchCameraDevice,
   HarborAssistantSearchDvrRecordingStatus,
@@ -48,6 +49,13 @@ interface HarborAssistantSearchPromptSuggestion {
 type HarborAssistantSearchLocalMediaStatus = 'archiving' | 'archive_failed' | 'finalizing';
 type HarborAssistantSearchRecordIntent = 'starting' | 'finalizing';
 type HarborAssistantLiveStreamProfile = 'sub' | 'main';
+
+interface HarborAssistantHlsWarmStartRequest {
+  deviceId: string;
+  streamProfile: HarborAssistantLiveStreamProfile;
+  token: number;
+  request$: Observable<HarborAssistantCameraLiveSessionResponse>;
+}
 
 interface HarborAssistantSearchMediaItem extends HarborAssistantSearchDvrTimelineSegment {
   local_preview_url?: string;
@@ -163,6 +171,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsWarmToken = 0;
   private hlsWarmTimer: number | null = null;
   private hlsWarmSession: HarborAssistantCameraLiveSessionResponse | null = null;
+  private hlsWarmStartRequest: HarborAssistantHlsWarmStartRequest | null = null;
   private hlsRecoveryAttempts = 0;
   private hlsFirstFrameSeen = false;
   private livePlaybackUserPaused = false;
@@ -263,6 +272,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
             devices: this.cameras(),
           });
         }),
+        tap((state) => this.applyCameraState(state)),
       ),
       dvr: this.api.dvrStatus().pipe(
         catchError((error: unknown) => {
@@ -271,35 +281,38 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         }),
       ),
     }).subscribe({
-      next: ({ state, dvr }) => {
-        const devices = state.devices ?? [];
-        const liveDevices = devices.filter((device) => !this.isFixtureCamera(device));
-        const currentSelection = this.selectedCameraId();
-        const defaultSelection = state.defaults?.selected_camera_device_id ?? null;
-        const defaultIsLive = liveDevices.some((device) => device.device_id === defaultSelection);
-        const currentIsLive = liveDevices.some((device) => device.device_id === currentSelection);
-        const fallbackSelection = liveDevices[0]?.device_id
-          ?? devices.find((device) => device.device_id !== this.fixtureCameraId)?.device_id
-          ?? null;
-        const selected = currentSelection && currentIsLive
-          ? currentSelection
-          : defaultIsLive
-            ? defaultSelection
-            : fallbackSelection;
-        this.cameras.set(devices);
-        if (selected !== currentSelection) {
-          this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(selected));
-        }
-        this.selectedCameraId.set(selected);
+      next: ({ dvr }) => {
         this.dvrStatuses.set(dvr.statuses ?? []);
-        this.loadDvrTimeline(selected, refreshErrors);
-        this.scheduleHlsLivePrewarm();
+        this.loadDvrTimeline(this.selectedCameraId(), refreshErrors);
       },
       error: (error: unknown) => {
         this.cameraLoading.set(false);
         this.cameraError.set(harborAssistantSearchErrorMessage(error));
       },
     });
+  }
+
+  private applyCameraState(state: HarborAssistantSearchCameraStateResponse): void {
+    const devices = state.devices ?? [];
+    const liveDevices = devices.filter((device) => !this.isFixtureCamera(device));
+    const currentSelection = this.selectedCameraId();
+    const defaultSelection = state.defaults?.selected_camera_device_id ?? null;
+    const defaultIsLive = liveDevices.some((device) => device.device_id === defaultSelection);
+    const currentIsLive = liveDevices.some((device) => device.device_id === currentSelection);
+    const fallbackSelection = liveDevices[0]?.device_id
+      ?? devices.find((device) => device.device_id !== this.fixtureCameraId)?.device_id
+      ?? null;
+    const selected = currentSelection && currentIsLive
+      ? currentSelection
+      : defaultIsLive
+        ? defaultSelection
+        : fallbackSelection;
+    this.cameras.set(devices);
+    if (selected !== currentSelection) {
+      this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(selected));
+    }
+    this.selectedCameraId.set(selected);
+    this.scheduleHlsLivePrewarm();
   }
 
   selectCamera(deviceId: string): void {
@@ -594,6 +607,15 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsLiveStatus.set('starting');
     this.hlsLiveError.set(null);
     this.hlsLiveUrl.set(null);
+    const streamProfile = this.selectedStreamProfile();
+    const warmSession = this.hlsWarmSession
+      && this.hlsWarmSessionMatches(this.hlsWarmSession, deviceId, streamProfile)
+      ? this.hlsWarmSession
+      : null;
+    const warmStartRequest = this.hlsWarmStartRequest
+      && this.hlsWarmStartRequestMatches(this.hlsWarmStartRequest, deviceId, streamProfile)
+      ? this.hlsWarmStartRequest.request$
+      : null;
     this.cancelHlsLivePrewarmForPlayback();
     this.hlsAttachToken += 1;
     this.hlsPlaybackToken += 1;
@@ -601,7 +623,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsFirstFrameSeen = false;
     this.resetLivePlaybackUserPause();
     this.stopHlsPlayback();
-    this.api.startCameraLiveSession(deviceId, this.selectedStreamProfile()).pipe(
+    const startRequest = warmSession
+      ? of(warmSession)
+      : warmStartRequest ?? this.api.startCameraLiveSession(deviceId, streamProfile);
+    startRequest.pipe(
+      takeUntilDestroyed(this.destroyRef),
       finalize(() => {
         if (this.actionBusy() === 'live') {
           this.actionBusy.set(null);
@@ -711,11 +737,23 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (warmSession) {
       this.stopHlsWarmSession();
     }
+    const warmStartRequest = this.hlsWarmStartRequest;
+    if (warmStartRequest && this.hlsWarmStartRequestMatches(warmStartRequest, deviceId, streamProfile)) {
+      return;
+    }
     this.hlsWarmToken += 1;
     const token = this.hlsWarmToken;
-    this.api.startCameraLiveSession(deviceId, streamProfile).pipe(
+    const request$ = this.api.startCameraLiveSession(deviceId, streamProfile).pipe(
       takeUntilDestroyed(this.destroyRef),
-    ).subscribe({
+      finalize(() => {
+        if (this.hlsWarmStartRequest?.token === token) {
+          this.hlsWarmStartRequest = null;
+        }
+      }),
+      shareReplay({ bufferSize: 1, refCount: false }),
+    );
+    this.hlsWarmStartRequest = { deviceId, streamProfile, token, request$ };
+    request$.subscribe({
       next: (session) => {
         if (!this.hlsWarmPrewarmCanContinue(session, token)) {
           this.releaseStaleHlsWarmSession(session);
@@ -792,6 +830,14 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     return Boolean(session.session_id)
       && session.device_id === deviceId
       && this.normalizeLiveStreamProfile(session.stream_profile) === streamProfile;
+  }
+
+  private hlsWarmStartRequestMatches(
+    request: HarborAssistantHlsWarmStartRequest,
+    deviceId: string,
+    streamProfile: HarborAssistantLiveStreamProfile,
+  ): boolean {
+    return request.deviceId === deviceId && request.streamProfile === streamProfile;
   }
 
   private cancelHlsLivePrewarmForPlayback(): void {
