@@ -9,7 +9,7 @@ import { MatDialog } from '@angular/material/dialog';
 import { MatProgressBar } from '@angular/material/progress-bar';
 import { MatTab, MatTabGroup } from '@angular/material/tabs';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
-import { forkJoin, Observable, of, timer } from 'rxjs';
+import { forkJoin, fromEvent, Observable, of, timer } from 'rxjs';
 import { catchError, finalize, shareReplay, tap } from 'rxjs/operators';
 import Hls from 'hls.js';
 import {
@@ -57,6 +57,13 @@ interface HarborAssistantHlsWarmStartRequest {
   request$: Observable<HarborAssistantCameraLiveSessionResponse>;
 }
 
+interface HarborAssistantLivePlaybackRequest {
+  allowDelayedPlayback: boolean;
+  attempt: number;
+  token: number;
+  url: string;
+}
+
 interface HarborAssistantSearchMediaItem extends HarborAssistantSearchDvrTimelineSegment {
   local_preview_url?: string;
   local_status?: HarborAssistantSearchLocalMediaStatus;
@@ -91,6 +98,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly translate = inject(TranslateService);
   @ViewChild('liveImage') private liveImage?: ElementRef<HTMLImageElement>;
   @ViewChild('liveVideo') private liveVideo?: ElementRef<HTMLVideoElement>;
+  @ViewChild('playbackVideo') private playbackVideo?: ElementRef<HTMLVideoElement>;
   @ViewChild('mediaViewer') private mediaViewer?: ElementRef<HTMLElement>;
   @ViewChild('searchResults') private searchResults?: ElementRef<HTMLElement>;
 
@@ -174,11 +182,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsWarmStartRequest: HarborAssistantHlsWarmStartRequest | null = null;
   private hlsRecoveryAttempts = 0;
   private hlsFirstFrameSeen = false;
+  private livePlaybackHasPlayed = false;
+  private livePlaybackBackgroundPaused = false;
   private livePlaybackUserPaused = false;
   private livePlaybackUserDelayed = false;
   private userLivePlaybackAnchorSeconds: number | null = null;
   private userLivePlaybackRate = 1;
-  private pendingProgrammaticLivePlayCount = 0;
+  private pendingProgrammaticLivePlayToken: number | null = null;
   private suppressLivePauseEvent = false;
   private programmaticLiveSeekTargetSeconds: number | null = null;
   private programmaticLivePlaybackRateTarget: number | null = null;
@@ -203,10 +213,18 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.refreshCameraDvr();
+    fromEvent(document, 'visibilitychange').pipe(
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe(() => this.handleLiveDocumentVisibilityChange());
     timer(0, 3000).pipe(
       takeUntilDestroyed(this.destroyRef),
     ).subscribe(() => {
-      if (!this.isRecording() && this.recordIntent() === null && this.actionBusy() !== 'snapshot') {
+      if (
+        this.hlsLiveStatus() !== 'stopped'
+        && !this.isRecording()
+        && this.recordIntent() === null
+        && this.actionBusy() !== 'snapshot'
+      ) {
         this.liveSnapshotToken.set(Date.now());
       }
     });
@@ -472,7 +490,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.actionError.set(null);
     this.resetPlaybackSeekAnchor();
     this.selectedMediaItem.set(segment);
-    this.selectedTabIndex.set(1);
+    this.onCameraTabChange(1);
     this.scrollToMediaViewer();
   }
 
@@ -961,6 +979,19 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     return this.hlsLiveStatus() === 'starting' || this.hlsLiveStatus() === 'live';
   }
 
+  onCameraTabChange(index: number): void {
+    this.selectedTabIndex.set(index);
+    if (index !== 0) {
+      return;
+    }
+    this.pausePlaybackVideo();
+    if (this.livePlaybackBackgroundPaused) {
+      this.scheduleLiveVideoPlayback(0, this.hlsLiveUrl(), this.hlsPlaybackToken, true);
+      return;
+    }
+    this.resumeLivePlayback();
+  }
+
   resumeLivePlayback(): void {
     if (this.livePlaybackUserPaused) {
       return;
@@ -974,6 +1005,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   onLiveVideoPlaying(): void {
+    this.livePlaybackHasPlayed = true;
+    this.livePlaybackBackgroundPaused = false;
     this.markHlsPlaybackReady();
   }
 
@@ -981,11 +1014,68 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (this.suppressLivePauseEvent || !this.hlsLiveUrl() || this.hlsLiveStatus() !== 'live') {
       return;
     }
+    if (this.selectedTabIndex() !== 0) {
+      this.preserveBackgroundLivePlaybackPosition();
+      this.hlsLiveError.set(null);
+      this.scheduleLiveVideoPlayback(0, this.hlsLiveUrl(), this.hlsPlaybackToken, true);
+      return;
+    }
+    if (this.liveDocumentIsHidden()) {
+      this.preserveBackgroundLivePlaybackPosition();
+      this.hlsLiveError.set(null);
+      this.scheduleLiveVideoPlayback(0, this.hlsLiveUrl(), this.hlsPlaybackToken, true);
+      return;
+    }
+    if (!this.livePlaybackHasPlayed && !this.livePlaybackUserPaused) {
+      this.hlsLiveError.set(null);
+      this.scheduleLiveVideoPlayback();
+      return;
+    }
     this.livePlaybackUserPaused = true;
     this.livePlaybackUserDelayed = true;
     this.userLivePlaybackAnchorSeconds = this.normalizedLiveVideoCurrentTime();
     this.hlsPlaybackToken += 1;
     this.hlsLiveError.set(null);
+  }
+
+  private handleLiveDocumentVisibilityChange(): void {
+    if (!this.hlsLiveUrl() || this.hlsLiveStatus() !== 'live' || this.livePlaybackUserPaused) {
+      return;
+    }
+    const video = this.liveVideo?.nativeElement;
+    if (this.liveDocumentIsHidden()) {
+      if (video?.paused) {
+        this.preserveBackgroundLivePlaybackPosition();
+        this.scheduleLiveVideoPlayback(0, this.hlsLiveUrl(), this.hlsPlaybackToken, true);
+      }
+      return;
+    }
+    if (video?.paused && this.livePlaybackHasPlayed) {
+      this.preserveBackgroundLivePlaybackPosition();
+    }
+    if (this.livePlaybackBackgroundPaused || video?.paused) {
+      this.scheduleLiveVideoPlayback(0, this.hlsLiveUrl(), this.hlsPlaybackToken, true);
+    }
+  }
+
+  private preserveBackgroundLivePlaybackPosition(): void {
+    this.livePlaybackBackgroundPaused = true;
+    const currentTime = this.normalizedLiveVideoCurrentTime();
+    if (currentTime !== null && this.livePlaybackHasPlayed) {
+      this.livePlaybackUserDelayed = true;
+      this.userLivePlaybackAnchorSeconds = currentTime;
+    }
+  }
+
+  private liveDocumentIsHidden(): boolean {
+    return document.visibilityState === 'hidden';
+  }
+
+  private pausePlaybackVideo(): void {
+    const video = this.playbackVideo?.nativeElement;
+    if (video && !video.paused) {
+      video.pause();
+    }
   }
 
   onLiveVideoPlay(): void {
@@ -1148,6 +1238,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   selectedLiveUrl(): string | null {
+    if (this.hlsLiveStatus() === 'stopped') {
+      return null;
+    }
     if (this.hlsLiveUrl() && this.hlsLiveStatus() !== 'degraded') {
       return null;
     }
@@ -1178,6 +1271,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   livePreviewErrorMessage(): string | null {
+    if (this.hlsLiveStatus() === 'stopped') {
+      return null;
+    }
     if (!this.selectedCameraId()) {
       return 'Choose a camera.';
     }
@@ -2016,13 +2112,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private scheduleLiveVideoPlayback(
     attempt = 0,
     url = this.hlsLiveUrl(),
-    token = this.hlsPlaybackToken + 1,
+    token = this.hlsPlaybackToken,
+    allowDelayedPlayback = false,
   ): void {
-    if (!url || this.livePlaybackUserPaused || this.livePlaybackUserDelayed) {
+    if (!url || this.livePlaybackUserPaused || (this.livePlaybackUserDelayed && !allowDelayedPlayback)) {
       return;
-    }
-    if (attempt === 0) {
-      this.hlsPlaybackToken = token;
     }
     window.setTimeout(() => {
       if (
@@ -2030,6 +2124,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         || this.hlsLiveUrl() !== url
         || this.hlsLiveStatus() === 'stopped'
         || this.livePlaybackUserPaused
+        || (this.livePlaybackUserDelayed && !allowDelayedPlayback)
       ) {
         return;
       }
@@ -2042,28 +2137,63 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         this.hlsLiveError.set(null);
         return;
       }
-      this.requestProgrammaticLiveVideoPlay(video, token, attempt);
-      if (attempt < 6) {
-        this.scheduleLiveVideoPlayback(attempt + 1, url, token);
+      if (allowDelayedPlayback && this.livePlaybackBackgroundPaused) {
+        this.restoreUserLivePlaybackAnchor(video);
+        this.applyUserLivePlaybackRate(video);
       }
+      this.requestProgrammaticLiveVideoPlay(video, {
+        allowDelayedPlayback,
+        attempt,
+        token,
+        url,
+      });
     }, attempt === 0 ? 0 : 350);
   }
 
-  private requestProgrammaticLiveVideoPlay(video: HTMLVideoElement, token: number, attempt: number): void {
-    this.pendingProgrammaticLivePlayCount += 1;
+  private requestProgrammaticLiveVideoPlay(
+    video: HTMLVideoElement,
+    request: HarborAssistantLivePlaybackRequest,
+  ): void {
+    if (this.hasPendingProgrammaticLivePlayRequest(request.token)) {
+      return;
+    }
+    this.pendingProgrammaticLivePlayToken = request.token;
     void video.play().then(() => {
-      this.completeProgrammaticLivePlayRequest();
-      if (this.hlsPlaybackToken !== token || this.livePlaybackUserPaused) {
+      this.completeProgrammaticLivePlayRequest(request.token);
+      if (this.livePlaybackUserPaused) {
         this.pauseLiveVideoSilently(video);
+        return;
+      }
+      if (!this.livePlaybackRequestIsCurrent(request)) {
         return;
       }
       this.hlsLiveError.set(null);
     }).catch(() => {
-      this.completeProgrammaticLivePlayRequest();
-      if (attempt >= 6 && this.hlsPlaybackToken === token && !this.livePlaybackUserPaused) {
+      this.completeProgrammaticLivePlayRequest(request.token);
+      if (!this.livePlaybackRequestIsCurrent(request)) {
+        return;
+      }
+      if (request.attempt < 6) {
+        this.scheduleLiveVideoPlayback(
+          request.attempt + 1,
+          request.url,
+          request.token,
+          request.allowDelayedPlayback,
+        );
+        return;
+      }
+      if (!this.liveDocumentIsHidden()) {
         this.hlsLiveError.set('Browser paused live playback. Press the video play control.');
       }
     });
+  }
+
+  private livePlaybackRequestIsCurrent(request: HarborAssistantLivePlaybackRequest): boolean {
+    return this.hlsPlaybackToken === request.token
+      && this.hlsLiveUrl() === request.url
+      && this.hlsLiveStatus() !== 'stopped'
+      && !this.livePlaybackUserPaused
+      && (!this.livePlaybackUserDelayed || request.allowDelayedPlayback);
   }
 
   private stopHlsPlayback(): void {
@@ -2073,6 +2203,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       this.hls = null;
     }
     this.hlsFirstFrameSeen = false;
+    this.livePlaybackHasPlayed = false;
+    this.livePlaybackBackgroundPaused = false;
+    this.pendingProgrammaticLivePlayToken = null;
     const video = this.liveVideo?.nativeElement;
     if (video) {
       this.pauseLiveVideoSilently(video);
@@ -2133,11 +2266,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   private resetLivePlaybackUserPause(): void {
+    this.livePlaybackBackgroundPaused = false;
     this.livePlaybackUserPaused = false;
     this.livePlaybackUserDelayed = false;
     this.userLivePlaybackAnchorSeconds = null;
     this.userLivePlaybackRate = this.defaultLivePlaybackRate;
-    this.pendingProgrammaticLivePlayCount = 0;
+    this.pendingProgrammaticLivePlayToken = null;
     this.programmaticLiveSeekTargetSeconds = null;
     this.programmaticLivePlaybackRateTarget = null;
   }
@@ -2207,12 +2341,17 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     return Math.abs(video.currentTime - targetTime) <= this.playbackSeekDriftToleranceSeconds;
   }
 
-  private hasPendingProgrammaticLivePlayRequest(): boolean {
-    return this.pendingProgrammaticLivePlayCount > 0;
+  private hasPendingProgrammaticLivePlayRequest(token?: number): boolean {
+    if (token === undefined) {
+      return this.pendingProgrammaticLivePlayToken !== null;
+    }
+    return this.pendingProgrammaticLivePlayToken === token;
   }
 
-  private completeProgrammaticLivePlayRequest(): void {
-    this.pendingProgrammaticLivePlayCount = Math.max(0, this.pendingProgrammaticLivePlayCount - 1);
+  private completeProgrammaticLivePlayRequest(token: number): void {
+    if (this.pendingProgrammaticLivePlayToken === token) {
+      this.pendingProgrammaticLivePlayToken = null;
+    }
   }
 
   private pauseLiveVideoSilently(video: HTMLVideoElement): void {

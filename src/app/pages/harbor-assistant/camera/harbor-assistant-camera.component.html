@@ -2,8 +2,9 @@
   <mat-tab-group
     class="harbor-assistant-camera-tabs"
     animationDuration="120ms"
+    preserveContent
     [selectedIndex]="selectedTabIndex()"
-    (selectedIndexChange)="selectedTabIndex.set($event)"
+    (selectedIndexChange)="onCameraTabChange($event)"
   >
     <mat-tab [label]="'Live' | translate">
       <section class="live-tab">
@@ -254,6 +255,7 @@
               <img [src]="mediaPlaybackUrl(mediaItem)" [alt]="selectedCameraLabel() + ' snapshot'" />
             } @else {
               <video
+                #playbackVideo
                 [src]="mediaPlaybackUrl(mediaItem)"
                 controls
                 autoplay
