@@ -202,6 +202,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly liveEdgeBackoffSeconds = 6;
   private readonly liveEdgeMaxDriftSeconds = 18;
   private readonly liveEdgeReturnToleranceSeconds = 1;
+  private readonly liveEdgeMonitorIntervalMs = 1_000;
   private readonly livePausedTimeDriftToleranceSeconds = 0.2;
   private readonly playbackSeekDriftToleranceSeconds = 0.2;
   private readonly livePlaybackRateChangeTolerance = 0.01;
@@ -1116,10 +1117,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     const liveEdge = this.liveVideoEdgeSeconds(video);
-    if (!this.livePlaybackUserDelayed && liveEdge !== null && this.liveVideoIsAtLiveEdge(video, liveEdge)) {
-      this.resetLivePlaybackUserPause();
-      this.resetUserLivePlaybackRate(video);
-      this.hlsLiveError.set(null);
+    if (
+      !this.livePlaybackUserDelayed
+      && this.userLivePlaybackRateIsCatchingUp(playbackRate)
+      && this.returnLivePlaybackToNormalRateAtEdge(video, liveEdge)
+    ) {
       return;
     }
     this.userLivePlaybackRate = playbackRate;
@@ -1128,6 +1130,22 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       this.hlsPlaybackToken += 1;
     }
     this.hlsLiveError.set(null);
+  }
+
+  onLiveVideoTimeUpdate(): void {
+    if (
+      !this.hlsLiveUrl()
+      || this.hlsLiveStatus() !== 'live'
+      || !this.livePlaybackUserDelayed
+      || !this.userLivePlaybackRateIsCatchingUp()
+    ) {
+      return;
+    }
+    const video = this.liveVideo?.nativeElement;
+    if (!video) {
+      return;
+    }
+    this.returnLivePlaybackToNormalRateAtEdge(video);
   }
 
   onLiveVideoSeeked(): void {
@@ -1142,10 +1160,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     const liveEdge = this.liveVideoEdgeSeconds(video);
-    if (liveEdge !== null && this.liveVideoIsAtLiveEdge(video, liveEdge)) {
-      this.resetLivePlaybackUserPause();
-      this.resetUserLivePlaybackRate(video);
-      this.hlsLiveError.set(null);
+    if (this.returnLivePlaybackToNormalRateAtEdge(video, liveEdge)) {
       return;
     }
     this.livePlaybackUserPaused = video.paused;
@@ -2222,7 +2237,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         return;
       }
       this.seekLiveVideoToEdge();
-    }, 2500);
+    }, this.liveEdgeMonitorIntervalMs);
   }
 
   private stopLiveEdgeMonitor(): void {
@@ -2245,10 +2260,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     if (this.livePlaybackUserDelayed) {
-      if (this.liveVideoIsAtLiveEdge(video, liveEdge)) {
-        this.resetLivePlaybackUserPause();
-        this.resetUserLivePlaybackRate(video);
-        this.hlsLiveError.set(null);
+      if (
+        this.userLivePlaybackRateIsCatchingUp()
+        && this.returnLivePlaybackToNormalRateAtEdge(video, liveEdge)
+      ) {
         return;
       }
       this.applyUserLivePlaybackRate(video);
@@ -2390,11 +2405,32 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   private liveVideoIsAtLiveEdge(video: HTMLVideoElement, liveEdge: number): boolean {
-    return liveEdge - video.currentTime <= this.liveEdgeReturnToleranceSeconds;
+    const liveSyncPosition = this.hls?.liveSyncPosition;
+    const stableLiveEdge = typeof liveSyncPosition === 'number' && Number.isFinite(liveSyncPosition)
+      ? Math.min(liveEdge, liveSyncPosition)
+      : liveEdge;
+    return stableLiveEdge - video.currentTime <= this.liveEdgeReturnToleranceSeconds;
+  }
+
+  private returnLivePlaybackToNormalRateAtEdge(
+    video: HTMLVideoElement,
+    liveEdge = this.liveVideoEdgeSeconds(video),
+  ): boolean {
+    if (liveEdge === null || !this.liveVideoIsAtLiveEdge(video, liveEdge)) {
+      return false;
+    }
+    this.resetLivePlaybackUserPause();
+    this.resetUserLivePlaybackRate(video);
+    this.hlsLiveError.set(null);
+    return true;
   }
 
   private applyUserLivePlaybackRate(video: HTMLVideoElement): void {
     this.setLiveVideoPlaybackRate(video, this.userLivePlaybackRate);
+  }
+
+  private userLivePlaybackRateIsCatchingUp(playbackRate = this.userLivePlaybackRate): boolean {
+    return playbackRate > this.defaultLivePlaybackRate + this.livePlaybackRateChangeTolerance;
   }
 
   private resetUserLivePlaybackRate(video = this.liveVideo?.nativeElement): void {

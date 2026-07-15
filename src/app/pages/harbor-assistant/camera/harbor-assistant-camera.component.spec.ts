@@ -832,6 +832,38 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('keeps a user-selected slow playback rate at the HLS live edge', fakeAsync(() => {
+    spectator = createComponent();
+    const bufferedRange = fakeTimeRanges([[0, 90]]);
+    const video = fakeLiveVideo({
+      currentTime: 89.5,
+      paused: false,
+      playbackRate: 1,
+      buffered: bufferedRange,
+      seekable: bufferedRange,
+    });
+    const componentState = spectator.component as unknown as {
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoRateChange: () => void;
+      onLiveVideoTimeUpdate: () => void;
+      startLiveEdgeMonitor: () => void;
+    };
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: video };
+
+    video.playbackRate = 0.25;
+    componentState.onLiveVideoRateChange();
+    componentState.onLiveVideoTimeUpdate();
+    componentState.startLiveEdgeMonitor();
+    tick(1_000);
+
+    expect(video.playbackRate).toBe(0.25);
+    discardPeriodicTasks();
+  }));
+
   it('returns delayed HLS playback to normal rate after catching up to live edge', fakeAsync(() => {
     spectator = createComponent();
     const bufferedRange = fakeTimeRanges([[0, 90]]);
@@ -866,6 +898,83 @@ describe('Harbor Assistant camera component', () => {
     componentState.seekLiveVideoToEdge(true);
 
     expect(video.currentTime).toBe(84);
+    expect(video.playbackRate).toBe(1);
+    discardPeriodicTasks();
+  }));
+
+  it('returns delayed HLS playback to normal rate at the stable HLS live sync position', fakeAsync(() => {
+    spectator = createComponent();
+    const bufferedRange = fakeTimeRanges([[0, 90]]);
+    const video = fakeLiveVideo({
+      currentTime: 35,
+      paused: false,
+      playbackRate: 1,
+      buffered: bufferedRange,
+      seekable: bufferedRange,
+    });
+    const componentState = spectator.component as unknown as {
+      hls: Hls | null;
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoRateChange: () => void;
+      onLiveVideoSeeked: () => void;
+      onLiveVideoTimeUpdate: () => void;
+    };
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: video };
+    componentState.hls = { liveSyncPosition: 88, destroy: jest.fn() } as unknown as Hls;
+
+    componentState.onLiveVideoSeeked();
+    video.playbackRate = 2;
+    componentState.onLiveVideoRateChange();
+    video.currentTime = 86.5;
+    componentState.onLiveVideoTimeUpdate();
+
+    expect(video.playbackRate).toBe(2);
+
+    video.currentTime = 87.1;
+    componentState.onLiveVideoTimeUpdate();
+
+    expect(video.playbackRate).toBe(1);
+    discardPeriodicTasks();
+  }));
+
+  it('checks the live edge every second while delayed playback is catching up', fakeAsync(() => {
+    spectator = createComponent();
+    const bufferedRange = fakeTimeRanges([[0, 90]]);
+    const video = fakeLiveVideo({
+      currentTime: 35,
+      paused: false,
+      playbackRate: 1,
+      buffered: bufferedRange,
+      seekable: bufferedRange,
+    });
+    const componentState = spectator.component as unknown as {
+      hls: Hls | null;
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoRateChange: () => void;
+      onLiveVideoSeeked: () => void;
+      startLiveEdgeMonitor: () => void;
+    };
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: video };
+    componentState.hls = { liveSyncPosition: 88, destroy: jest.fn() } as unknown as Hls;
+
+    componentState.onLiveVideoSeeked();
+    video.playbackRate = 2;
+    componentState.onLiveVideoRateChange();
+    video.currentTime = 87.1;
+    componentState.startLiveEdgeMonitor();
+
+    tick(999);
+    expect(video.playbackRate).toBe(2);
+
+    tick(1);
     expect(video.playbackRate).toBe(1);
     discardPeriodicTasks();
   }));

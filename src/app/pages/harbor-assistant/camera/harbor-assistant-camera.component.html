@@ -87,6 +87,7 @@
                       (play)="onLiveVideoPlay()"
                       (ratechange)="onLiveVideoRateChange()"
                       (seeked)="onLiveVideoSeeked()"
+                      (timeupdate)="onLiveVideoTimeUpdate()"
                     ></video>
                   } @else if (selectedLiveUrl(); as liveUrl) {
                     <img
