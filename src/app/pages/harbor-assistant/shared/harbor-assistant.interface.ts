@@ -110,6 +110,9 @@ export interface HarborAssistantCameraLiveSessionResponse {
   status: 'starting' | 'running' | 'stopped' | 'failed' | 'degraded' | string;
   playlist_url?: string | null;
   playlist_ready: boolean;
+  webrtc_url?: string | null;
+  webrtc_status?: string;
+  webrtc_message?: string | null;
   mode: string;
   codec: string;
   stream_profile?: 'sub' | 'main' | string;

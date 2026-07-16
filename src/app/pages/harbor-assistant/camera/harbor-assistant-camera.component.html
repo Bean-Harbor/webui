@@ -57,6 +57,7 @@
             <div class="dvr-preview-row">
               <div class="live-stack">
                 <div
+                  #livePanel
                   class="live-panel"
                   [class.recording]="isRecording()"
                   [class.starting]="recordIntent() === 'starting'"
@@ -71,11 +72,10 @@
                   @if (liveFeedback()) {
                     <div class="live-feedback">{{ liveFeedback() | translate }}</div>
                   }
-                  @if (hlsLiveUrl()) {
+                  @if (hlsLiveUrl() || webrtcLiveUrl()) {
                     <video
                       #liveVideo
                       autoplay
-                      controls
                       muted
                       playsinline
                       preload="auto"
@@ -88,7 +88,30 @@
                       (ratechange)="onLiveVideoRateChange()"
                       (seeked)="onLiveVideoSeeked()"
                       (timeupdate)="onLiveVideoTimeUpdate()"
+                      (volumechange)="onLiveVideoVolumeChange()"
                     ></video>
+                    <canvas
+                      #liveTransitionFrame
+                      class="live-transition-frame"
+                      [class.visible]="liveTransitionFrameVisible()"
+                      aria-hidden="true"
+                    ></canvas>
+                    <ix-harbor-assistant-live-controls
+                      [currentTime]="liveControlCurrentTime()"
+                      [endTime]="liveControlEndTime()"
+                      [fullscreenTarget]="livePanel"
+                      [muted]="liveControlMuted()"
+                      [paused]="liveControlPaused()"
+                      [playbackMode]="liveControlPlaybackMode()"
+                      [playbackRate]="liveControlPlaybackRate()"
+                      [startTime]="liveControlStartTime()"
+                      [volume]="liveControlVolume()"
+                      (mutedChange)="setLiveMutedFromControls($event)"
+                      (playbackRateChange)="setLivePlaybackRateFromControls($event)"
+                      (playbackToggle)="toggleLivePlaybackFromControls()"
+                      (seekRequested)="seekLivePlaybackFromControls($event)"
+                      (volumeChange)="setLiveVolumeFromControls($event)"
+                    ></ix-harbor-assistant-live-controls>
                   } @else if (selectedLiveUrl(); as liveUrl) {
                     <img
                       #liveImage

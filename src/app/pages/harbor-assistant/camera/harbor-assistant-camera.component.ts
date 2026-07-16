@@ -37,6 +37,10 @@ import {
   HarborTimeRangeDialogComponent,
   HarborTimeRangeValue,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant-time-range-dialog.component';
+import {
+  HarborAssistantLiveControlsComponent,
+  HarborAssistantLivePlaybackMode,
+} from './live-controls/harbor-assistant-live-controls.component';
 
 interface HarborAssistantSearchPromptSuggestion {
   label: string;
@@ -49,6 +53,12 @@ interface HarborAssistantSearchPromptSuggestion {
 type HarborAssistantSearchLocalMediaStatus = 'archiving' | 'archive_failed' | 'finalizing';
 type HarborAssistantSearchRecordIntent = 'starting' | 'finalizing';
 type HarborAssistantLiveStreamProfile = 'sub' | 'main';
+type HarborAssistantLiveTransport = 'hls' | 'webrtc';
+
+interface HarborAssistantVideoFrameCallbacks {
+  cancelVideoFrameCallback?: (callbackId: number) => void;
+  requestVideoFrameCallback?: (callback: () => void) => number;
+}
 
 interface HarborAssistantHlsWarmStartRequest {
   deviceId: string;
@@ -88,6 +98,7 @@ interface HarborAssistantSearchMediaItem extends HarborAssistantSearchDvrTimelin
     MatProgressBar,
     MatTab,
     MatTabGroup,
+    HarborAssistantLiveControlsComponent,
   ],
 })
 export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
@@ -97,6 +108,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly dialog = inject(MatDialog);
   private readonly translate = inject(TranslateService);
   @ViewChild('liveImage') private liveImage?: ElementRef<HTMLImageElement>;
+  @ViewChild('liveTransitionFrame') private liveTransitionFrame?: ElementRef<HTMLCanvasElement>;
   @ViewChild('liveVideo') private liveVideo?: ElementRef<HTMLVideoElement>;
   @ViewChild('playbackVideo') private playbackVideo?: ElementRef<HTMLVideoElement>;
   @ViewChild('mediaViewer') private mediaViewer?: ElementRef<HTMLElement>;
@@ -158,9 +170,19 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   protected readonly lastGoodLiveFrameUrl = signal<string | null>(null);
   protected readonly liveMjpegFailed = signal(false);
   protected readonly hlsLiveUrl = signal<string | null>(null);
+  protected readonly webrtcLiveUrl = signal<string | null>(null);
   protected readonly hlsLiveSession = signal<HarborAssistantCameraLiveSessionResponse | null>(null);
   protected readonly hlsLiveStatus = signal<'stopped' | 'starting' | 'live' | 'degraded'>('stopped');
   protected readonly hlsLiveError = signal<string | null>(null);
+  protected readonly liveControlCurrentTime = signal(0);
+  protected readonly liveControlEndTime = signal(0);
+  protected readonly liveControlMuted = signal(true);
+  protected readonly liveControlPaused = signal(true);
+  protected readonly liveControlPlaybackMode = signal<HarborAssistantLivePlaybackMode>('hls-fallback');
+  protected readonly liveControlPlaybackRate = signal(1);
+  protected readonly liveControlStartTime = signal(0);
+  protected readonly liveControlVolume = signal(1);
+  protected readonly liveTransitionFrameVisible = signal(false);
   protected readonly selectedStreamProfile = signal<HarborAssistantLiveStreamProfile>('sub');
   protected readonly actionBusy = signal<string | null>(null);
   protected readonly actionMessage = signal<string | null>(null);
@@ -181,6 +203,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsWarmSession: HarborAssistantCameraLiveSessionResponse | null = null;
   private hlsWarmStartRequest: HarborAssistantHlsWarmStartRequest | null = null;
   private hlsRecoveryAttempts = 0;
+  private webrtcAttachToken = 0;
+  private webrtcPlaybackPending = false;
+  private webrtcPeerConnection: RTCPeerConnection | null = null;
+  private webrtcResourceUrl: string | null = null;
+  private webrtcPauseTimelineSeconds: number | null = null;
+  private pendingHlsBehindLiveSeconds: number | null = null;
+  private hlsControlTimelineOffsetSeconds: number | null = null;
   private hlsFirstFrameSeen = false;
   private livePlaybackHasPlayed = false;
   private livePlaybackBackgroundPaused = false;
@@ -196,6 +225,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private playbackSeekMediaKey: string | null = null;
   private programmaticPlaybackSeekTargetSeconds: number | null = null;
   private liveEdgeMonitor: number | null = null;
+  private liveTransitionFrameCallbackId: number | null = null;
+  private liveTransitionFrameCallbackVideo: (HTMLVideoElement & HarborAssistantVideoFrameCallbacks) | null = null;
+  private liveTransitionRevealTimer: number | null = null;
+  private liveTransitionTarget: HarborAssistantLiveTransport | null = null;
+  private liveTransitionToken = 0;
   private hls: Hls | null = null;
   private readonly defaultLivePlaybackRate = 1;
   private readonly maxUserLivePlaybackRate = 4;
@@ -211,6 +245,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly hlsPrewarmMaxWaitMs = 60_000;
   private readonly hlsPlaylistPollIntervalMs = 500;
   private readonly hlsPlaylistMaxWaitMs = 90_000;
+  private readonly liveTransitionFallbackRevealDelayMs = 250;
+  private readonly liveTransitionPaintDelayMs = 32;
 
   ngOnInit(): void {
     this.refreshCameraDvr();
@@ -623,9 +659,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       this.stopLive(false);
     }
     this.actionBusy.set('live');
+    this.cancelLiveTransportTransition();
     this.hlsLiveStatus.set('starting');
     this.hlsLiveError.set(null);
     this.hlsLiveUrl.set(null);
+    this.stopWebRtcPlayback();
     const streamProfile = this.selectedStreamProfile();
     const warmSession = this.hlsWarmSession
       && this.hlsWarmSessionMatches(this.hlsWarmSession, deviceId, streamProfile)
@@ -657,8 +695,18 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         this.applySessionStreamProfile(session);
         this.hlsLiveSession.set(session);
         if (session.session_id) {
-          const attached = this.shouldAttachHlsPlayback(session)
+          this.rememberLivePlaybackUrls(session);
+          const usingWebRtc = this.startWebRtcPlaybackFromSession(session);
+          const attached = !usingWebRtc
+            && this.shouldAttachHlsPlayback(session)
             && this.startHlsPlaybackFromSession(session, { pending: !session.playlist_ready });
+          if (usingWebRtc) {
+            this.showLiveFeedback('Connecting low-latency live...', 1800);
+            if (!session.playlist_ready) {
+              this.waitForHlsPlaylist(session);
+            }
+            return;
+          }
           if (session.playlist_ready && attached) {
             this.showLiveFeedback('Live buffer is ready...', 1800);
             return;
@@ -694,8 +742,15 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         }
         this.applySessionStreamProfile(status);
         this.hlsLiveSession.set(status);
-        const attached = this.shouldAttachHlsPlayback(status)
+        this.rememberLivePlaybackUrls(status);
+        const usingWebRtc = this.isWebRtcPlaybackActive()
+          || this.startWebRtcPlaybackFromSession(status);
+        const attached = !usingWebRtc
+          && this.shouldAttachHlsPlayback(status)
           && this.startHlsPlaybackFromSession(status, { pending: !status.playlist_ready });
+        if (status.playlist_ready && usingWebRtc) {
+          return;
+        }
         if (status.playlist_ready && attached) {
           this.showLiveFeedback('Live buffer is ready...', 1800);
           return;
@@ -912,9 +967,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsAttachToken += 1;
     this.hlsPlaybackToken += 1;
     this.hlsRecoveryAttempts = 0;
+    this.cancelLiveTransportTransition();
     this.resetLivePlaybackUserPause();
+    this.stopWebRtcPlayback();
     this.stopHlsPlayback();
     this.hlsLiveUrl.set(null);
+    this.liveControlPlaybackMode.set('hls-fallback');
     this.hlsLiveStatus.set('stopped');
     this.hlsLiveError.set(null);
     this.hlsLiveSession.set(null);
@@ -937,7 +995,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   liveModeLabel(): string {
     if (this.hlsLiveStatus() === 'live') {
-      return `Live H.264 ${this.selectedStreamProfile()}`;
+      const transport = this.liveControlPlaybackMode() === 'webrtc' ? 'WebRTC' : 'HLS';
+      return `Live ${transport} H.264 ${this.selectedStreamProfile()}`;
     }
     if (this.hlsLiveStatus() === 'starting') {
       return `Starting ${this.selectedStreamProfile()} stream`;
@@ -987,6 +1046,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     this.pausePlaybackVideo();
     if (this.livePlaybackBackgroundPaused) {
+      if (this.liveControlPlaybackMode() === 'webrtc') {
+        this.resumeLivePlayback();
+        return;
+      }
       this.scheduleLiveVideoPlayback(0, this.hlsLiveUrl(), this.hlsPlaybackToken, true);
       return;
     }
@@ -997,21 +1060,45 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (this.livePlaybackUserPaused) {
       return;
     }
+    if (this.isWebRtcPlaybackActive()) {
+      const video = this.liveVideo?.nativeElement;
+      if (video?.paused) {
+        void video.play().catch(() => this.fallbackToHlsPlayback('WebRTC playback was interrupted.'));
+      }
+      return;
+    }
     this.scheduleLiveVideoPlayback();
   }
 
   onLiveVideoLoadedData(): void {
+    this.syncLiveControlState();
     this.markHlsPlaybackReady();
     this.resumeLivePlayback();
+    this.scheduleLiveTransportFrameReveal();
   }
 
   onLiveVideoPlaying(): void {
     this.livePlaybackHasPlayed = true;
     this.livePlaybackBackgroundPaused = false;
+    this.syncLiveControlState();
     this.markHlsPlaybackReady();
+    this.scheduleLiveTransportFrameReveal();
   }
 
   onLiveVideoPause(): void {
+    this.syncLiveControlState();
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      if (this.suppressLivePauseEvent || this.liveDocumentIsHidden() || this.selectedTabIndex() !== 0) {
+        this.livePlaybackBackgroundPaused = true;
+        return;
+      }
+      this.livePlaybackUserPaused = true;
+      this.livePlaybackUserDelayed = true;
+      this.webrtcPauseTimelineSeconds = this.liveSessionElapsedSeconds();
+      this.hlsPlaybackToken += 1;
+      this.hlsLiveError.set(null);
+      return;
+    }
     if (this.suppressLivePauseEvent || !this.hlsLiveUrl() || this.hlsLiveStatus() !== 'live') {
       return;
     }
@@ -1044,6 +1131,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     const video = this.liveVideo?.nativeElement;
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      if (!this.liveDocumentIsHidden() && video?.paused) {
+        this.livePlaybackBackgroundPaused = false;
+        void video.play().catch(() => this.fallbackToHlsPlayback('WebRTC playback did not resume.'));
+      }
+      return;
+    }
     if (this.liveDocumentIsHidden()) {
       if (video?.paused) {
         this.preserveBackgroundLivePlaybackPosition();
@@ -1080,6 +1174,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   onLiveVideoPlay(): void {
+    this.syncLiveControlState();
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      this.livePlaybackBackgroundPaused = false;
+      this.hlsLiveError.set(null);
+      return;
+    }
     if (!this.hlsLiveUrl() || this.hlsLiveStatus() !== 'live') {
       return;
     }
@@ -1102,6 +1202,14 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   onLiveVideoRateChange(): void {
+    this.syncLiveControlState();
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      const video = this.liveVideo?.nativeElement;
+      if (video && Math.abs(video.playbackRate - this.defaultLivePlaybackRate) > this.livePlaybackRateChangeTolerance) {
+        this.setLiveVideoPlaybackRate(video, this.defaultLivePlaybackRate);
+      }
+      return;
+    }
     if (!this.hlsLiveUrl() || this.hlsLiveStatus() !== 'live') {
       return;
     }
@@ -1133,6 +1241,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   onLiveVideoTimeUpdate(): void {
+    this.syncLiveControlState();
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      return;
+    }
     if (
       !this.hlsLiveUrl()
       || this.hlsLiveStatus() !== 'live'
@@ -1149,6 +1261,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   onLiveVideoSeeked(): void {
+    this.syncLiveControlState();
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      return;
+    }
     if (!this.hlsLiveUrl() || this.hlsLiveStatus() !== 'live') {
       return;
     }
@@ -1169,6 +1285,99 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsPlaybackToken += 1;
     this.applyUserLivePlaybackRate(video);
     this.hlsLiveError.set(null);
+  }
+
+  onLiveVideoVolumeChange(): void {
+    this.syncLiveControlState();
+  }
+
+  toggleLivePlaybackFromControls(): void {
+    const video = this.liveVideo?.nativeElement;
+    if (!video) {
+      return;
+    }
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      if (this.liveControlPaused() || video.paused) {
+        const timelineSeconds = this.webrtcPauseTimelineSeconds ?? this.liveSessionElapsedSeconds();
+        this.switchToHlsTimeshift(timelineSeconds, true);
+      } else {
+        const timelineSeconds = this.liveSessionElapsedSeconds();
+        this.webrtcPauseTimelineSeconds = timelineSeconds;
+        this.livePlaybackUserPaused = true;
+        this.livePlaybackUserDelayed = true;
+        video.pause();
+        this.liveControlCurrentTime.set(timelineSeconds);
+        this.liveControlPaused.set(true);
+      }
+      return;
+    }
+    if (video.paused) {
+      void video.play();
+    } else {
+      video.pause();
+    }
+  }
+
+  seekLivePlaybackFromControls(seconds: number): void {
+    const video = this.liveVideo?.nativeElement;
+    if (!video || !Number.isFinite(seconds)) {
+      return;
+    }
+    const start = this.liveControlStartTime();
+    const end = this.liveControlEndTime();
+    const timelineSeconds = Math.min(end, Math.max(start, seconds));
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      if (end - timelineSeconds <= this.liveEdgeReturnToleranceSeconds && !video.paused) {
+        return;
+      }
+      this.switchToHlsTimeshift(timelineSeconds, !video.paused);
+      return;
+    }
+    const liveEdge = this.liveVideoEdgeSeconds(video);
+    const sessionElapsed = this.liveSessionElapsedSeconds();
+    const timelineOffset = this.hlsControlTimelineOffset(sessionElapsed, liveEdge);
+    video.currentTime = liveEdge === null
+      ? timelineSeconds
+      : Math.max(0, timelineSeconds - timelineOffset);
+  }
+
+  setLivePlaybackRateFromControls(rate: number): void {
+    const video = this.liveVideo?.nativeElement;
+    if (!video || !Number.isFinite(rate) || rate <= 0 || rate > this.maxUserLivePlaybackRate) {
+      return;
+    }
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      if (video.paused) {
+        this.userLivePlaybackRate = rate;
+        this.liveControlPlaybackRate.set(rate);
+      } else {
+        this.userLivePlaybackRate = this.defaultLivePlaybackRate;
+        this.liveControlPlaybackRate.set(this.defaultLivePlaybackRate);
+      }
+      return;
+    }
+    video.playbackRate = rate;
+  }
+
+  setLiveMutedFromControls(muted: boolean): void {
+    const video = this.liveVideo?.nativeElement;
+    if (!video) {
+      return;
+    }
+    video.muted = muted;
+    this.syncLiveControlState();
+  }
+
+  setLiveVolumeFromControls(volume: number): void {
+    const video = this.liveVideo?.nativeElement;
+    if (!video || !Number.isFinite(volume)) {
+      return;
+    }
+    video.volume = Math.min(1, Math.max(0, volume));
+    if (video.volume > 0) {
+      video.muted = false;
+    }
+    this.syncLiveControlState();
   }
 
   onPlaybackVideoSeeking(event: Event): void {
@@ -1934,6 +2143,241 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     });
   }
 
+  private rememberLivePlaybackUrls(session: HarborAssistantCameraLiveSessionResponse): void {
+    if (session.playlist_url) {
+      this.hlsLiveUrl.set(harborAssistantSearchSameOriginAdminUrl(session.playlist_url));
+    }
+    if (session.webrtc_status === 'ready' && session.webrtc_url) {
+      this.webrtcLiveUrl.set(harborAssistantSearchSameOriginAdminUrl(session.webrtc_url));
+    }
+  }
+
+  private startWebRtcPlaybackFromSession(session: HarborAssistantCameraLiveSessionResponse): boolean {
+    if (
+      session.webrtc_status !== 'ready'
+      || !session.webrtc_url
+      || typeof RTCPeerConnection === 'undefined'
+    ) {
+      return false;
+    }
+    const url = harborAssistantSearchSameOriginAdminUrl(session.webrtc_url);
+    if (!url) {
+      return false;
+    }
+    if (this.liveControlPlaybackMode() !== 'webrtc') {
+      this.beginLiveTransportTransition('webrtc');
+    }
+    this.webrtcLiveUrl.set(url);
+    this.scheduleWebRtcPlaybackAttach(0, url);
+    return true;
+  }
+
+  private scheduleWebRtcPlaybackAttach(
+    attempt = 0,
+    url = this.webrtcLiveUrl(),
+    token = this.webrtcAttachToken + 1,
+  ): void {
+    if (!url) {
+      return;
+    }
+    if (attempt === 0) {
+      this.webrtcAttachToken = token;
+      this.webrtcPlaybackPending = true;
+    }
+    window.setTimeout(() => {
+      if (this.webrtcAttachToken !== token || this.webrtcLiveUrl() !== url) {
+        return;
+      }
+      const video = this.liveVideo?.nativeElement;
+      if (!video) {
+        if (attempt < 20) {
+          this.scheduleWebRtcPlaybackAttach(attempt + 1, url, token);
+        } else {
+          this.fallbackToHlsPlayback('WebRTC player did not initialize.');
+        }
+        return;
+      }
+      this.attachWhepPlayback(video, url, token).catch(() => {
+        if (this.webrtcAttachToken === token) {
+          this.fallbackToHlsPlayback('WebRTC connection failed.');
+        }
+      });
+    }, attempt === 0 ? 0 : 100);
+  }
+
+  private async attachWhepPlayback(video: HTMLVideoElement, url: string, token: number): Promise<void> {
+    const peerConnection = new RTCPeerConnection({ iceServers: [] });
+    this.webrtcPeerConnection?.close();
+    this.webrtcPeerConnection = peerConnection;
+    peerConnection.addTransceiver('video', { direction: 'recvonly' });
+    peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+    peerConnection.ontrack = (event) => {
+      if (this.webrtcAttachToken !== token || this.webrtcPeerConnection !== peerConnection) {
+        return;
+      }
+      const stream = event.streams[0] ?? new MediaStream([event.track]);
+      if (video.srcObject !== stream) {
+        this.stopHlsPlayback();
+        video.srcObject = stream;
+      }
+      video.autoplay = true;
+      video.playsInline = true;
+      video.muted = this.liveControlMuted();
+      video.volume = this.liveControlVolume();
+      this.liveControlPlaybackMode.set('webrtc');
+      this.webrtcPlaybackPending = false;
+      this.webrtcPauseTimelineSeconds = null;
+      this.resetLivePlaybackUserPause();
+      this.startLiveEdgeMonitor();
+      video.play().catch(() => this.fallbackToHlsPlayback('WebRTC playback was blocked.'));
+    };
+    peerConnection.onconnectionstatechange = () => {
+      if (this.webrtcAttachToken !== token || this.webrtcPeerConnection !== peerConnection) {
+        return;
+      }
+      if (peerConnection.connectionState === 'failed') {
+        this.fallbackToHlsPlayback('WebRTC connection failed.');
+      } else if (peerConnection.connectionState === 'disconnected') {
+        window.setTimeout(() => {
+          if (
+            this.webrtcAttachToken === token
+            && this.webrtcPeerConnection === peerConnection
+            && peerConnection.connectionState === 'disconnected'
+          ) {
+            this.fallbackToHlsPlayback('WebRTC connection was interrupted.');
+          }
+        }, 2_000);
+      }
+    };
+
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    await this.waitForIceGathering(peerConnection);
+    if (this.webrtcAttachToken !== token || !peerConnection.localDescription?.sdp) {
+      peerConnection.close();
+      return;
+    }
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: peerConnection.localDescription.sdp,
+    });
+    if (!response.ok) {
+      throw new Error(`WHEP negotiation failed with HTTP ${response.status}`);
+    }
+    const answer = await response.text();
+    const location = response.headers.get('Location');
+    this.webrtcResourceUrl = location ? new URL(location, window.location.href).toString() : null;
+    if (this.webrtcAttachToken !== token) {
+      peerConnection.close();
+      return;
+    }
+    await peerConnection.setRemoteDescription({ type: 'answer', sdp: answer });
+  }
+
+  private waitForIceGathering(peerConnection: RTCPeerConnection): Promise<void> {
+    if (peerConnection.iceGatheringState === 'complete') {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      let timeout = 0;
+      const handleStateChange = (): void => {
+        if (peerConnection.iceGatheringState !== 'complete') {
+          return;
+        }
+        window.clearTimeout(timeout);
+        peerConnection.removeEventListener('icegatheringstatechange', handleStateChange);
+        resolve();
+      };
+      timeout = window.setTimeout(() => {
+        peerConnection.removeEventListener('icegatheringstatechange', handleStateChange);
+        reject(new Error('WebRTC ICE gathering timed out'));
+      }, 5_000);
+      peerConnection.addEventListener('icegatheringstatechange', handleStateChange);
+    });
+  }
+
+  private isWebRtcPlaybackActive(): boolean {
+    return this.webrtcPlaybackPending || this.liveControlPlaybackMode() === 'webrtc';
+  }
+
+  private fallbackToHlsPlayback(message: string): void {
+    const session = this.hlsLiveSession();
+    if (this.isWebRtcPlaybackActive()) {
+      this.beginLiveTransportTransition('hls');
+    }
+    this.stopWebRtcPlayback(false);
+    this.liveControlPlaybackMode.set('hls-fallback');
+    this.hlsLiveError.set(`${message} HLS fallback is active.`);
+    if (session?.playlist_url && this.shouldAttachHlsPlayback(session)) {
+      this.startHlsPlaybackFromSession(session, { pending: !session.playlist_ready });
+      this.scheduleLiveTransportFrameReveal();
+    }
+    this.showLiveFeedback('WebRTC unavailable. Using HLS.', 2200);
+  }
+
+  private stopWebRtcPlayback(clearUrl = true): void {
+    this.webrtcAttachToken += 1;
+    this.webrtcPlaybackPending = false;
+    const peerConnection = this.webrtcPeerConnection;
+    this.webrtcPeerConnection = null;
+    if (peerConnection) {
+      peerConnection.ontrack = null;
+      peerConnection.onconnectionstatechange = null;
+      peerConnection.close();
+    }
+    const resourceUrl = this.webrtcResourceUrl;
+    this.webrtcResourceUrl = null;
+    if (resourceUrl && typeof fetch !== 'undefined') {
+      fetch(resourceUrl, { method: 'DELETE', keepalive: true }).catch((): void => undefined);
+    }
+    const video = this.liveVideo?.nativeElement;
+    if (video?.srcObject) {
+      this.pauseLiveVideoSilently(video);
+      video.srcObject = null;
+    }
+    if (clearUrl) {
+      this.webrtcLiveUrl.set(null);
+    }
+  }
+
+  private switchToHlsTimeshift(timelineSeconds: number, autoplay: boolean): void {
+    const session = this.hlsLiveSession();
+    if (!session?.playlist_url) {
+      this.fallbackToHlsPlayback('HLS time-shift is not ready.');
+      return;
+    }
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      this.beginLiveTransportTransition('hls');
+    }
+    this.pendingHlsBehindLiveSeconds = Math.max(0, this.liveSessionElapsedSeconds() - timelineSeconds);
+    this.livePlaybackUserPaused = !autoplay;
+    this.livePlaybackUserDelayed = true;
+    this.webrtcPauseTimelineSeconds = null;
+    this.stopWebRtcPlayback(false);
+    this.liveControlPlaybackMode.set('hls-timeshift');
+    this.startHlsPlaybackFromSession(session, { pending: !session.playlist_ready });
+  }
+
+  private restorePendingHlsPosition(video: HTMLVideoElement): void {
+    const behindLiveSeconds = this.pendingHlsBehindLiveSeconds;
+    const liveEdge = this.liveVideoEdgeSeconds(video);
+    if (behindLiveSeconds === null || liveEdge === null) {
+      return;
+    }
+    const seekableStart = video.seekable.length > 0 ? video.seekable.start(0) : 0;
+    const targetTime = Math.max(seekableStart, liveEdge - behindLiveSeconds);
+    this.pendingHlsBehindLiveSeconds = null;
+    this.userLivePlaybackAnchorSeconds = targetTime;
+    this.setLiveVideoCurrentTime(video, targetTime);
+    this.applyUserLivePlaybackRate(video);
+    if (this.livePlaybackUserPaused) {
+      this.pauseLiveVideoSilently(video);
+    } else {
+      this.scheduleLiveVideoPlayback(0, this.hlsLiveUrl(), this.hlsPlaybackToken, true);
+    }
+  }
+
   private shouldAttachHlsPlayback(session: HarborAssistantCameraLiveSessionResponse): boolean {
     return session.playlist_ready
       || Boolean(session.diagnostics?.playlist_exists)
@@ -1949,7 +2393,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
 
     const liveUrl = harborAssistantSearchSameOriginAdminUrl(session.playlist_url);
-    const shouldAttach = this.hlsLiveUrl() !== liveUrl;
+    const shouldAttach = this.hlsLiveUrl() !== liveUrl || this.hls === null;
     this.hlsLiveUrl.set(liveUrl);
     if (shouldAttach) {
       this.hlsFirstFrameSeen = false;
@@ -2004,7 +2448,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (!url || !video) {
       return false;
     }
+    const playbackMode = this.liveControlPlaybackMode();
     this.stopHlsPlayback();
+    this.liveControlPlaybackMode.set(
+      playbackMode === 'hls-timeshift' ? 'hls-timeshift' : 'hls-fallback',
+    );
     this.hlsRecoveryAttempts = 0;
     video.autoplay = true;
     video.defaultMuted = true;
@@ -2042,11 +2490,18 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       });
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         this.startLiveEdgeMonitor();
-        this.seekLiveVideoToEdge(true);
-        this.scheduleLiveVideoPlayback();
+        if (this.pendingHlsBehindLiveSeconds !== null) {
+          this.restorePendingHlsPosition(video);
+        } else {
+          this.seekLiveVideoToEdge(true);
+          this.scheduleLiveVideoPlayback();
+        }
       });
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
         this.markHlsPlaybackReady();
+        if (this.pendingHlsBehindLiveSeconds !== null) {
+          this.restorePendingHlsPosition(video);
+        }
         if (this.livePlaybackUserPaused) {
           this.restoreUserLivePlaybackAnchor();
         }
@@ -2062,7 +2517,15 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       video.src = url;
       video.load();
       this.startLiveEdgeMonitor();
-      this.scheduleLiveVideoPlayback();
+      if (this.pendingHlsBehindLiveSeconds !== null) {
+        const restorePosition = (): void => {
+          video.removeEventListener('loadedmetadata', restorePosition);
+          this.restorePendingHlsPosition(video);
+        };
+        video.addEventListener('loadedmetadata', restorePosition);
+      } else {
+        this.scheduleLiveVideoPlayback();
+      }
       return true;
     }
     this.hlsLiveStatus.set('degraded');
@@ -2220,6 +2683,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsFirstFrameSeen = false;
     this.livePlaybackHasPlayed = false;
     this.livePlaybackBackgroundPaused = false;
+    this.liveControlPaused.set(true);
+    this.hlsControlTimelineOffsetSeconds = null;
     this.pendingProgrammaticLivePlayToken = null;
     const video = this.liveVideo?.nativeElement;
     if (video) {
@@ -2230,10 +2695,120 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
   }
 
+  private beginLiveTransportTransition(target: HarborAssistantLiveTransport): void {
+    this.resetLiveTransitionRevealWait();
+    this.liveTransitionToken += 1;
+    this.liveTransitionTarget = target;
+    if (this.liveTransitionFrameVisible()) {
+      return;
+    }
+
+    const video = this.liveVideo?.nativeElement;
+    const canvas = this.liveTransitionFrame?.nativeElement;
+    if (
+      !video
+      || !canvas
+      || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
+      || video.videoWidth <= 0
+      || video.videoHeight <= 0
+    ) {
+      this.liveTransitionTarget = null;
+      return;
+    }
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      this.liveTransitionTarget = null;
+      return;
+    }
+
+    try {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      this.liveTransitionFrameVisible.set(true);
+    } catch {
+      this.liveTransitionTarget = null;
+      this.liveTransitionFrameVisible.set(false);
+    }
+  }
+
+  private scheduleLiveTransportFrameReveal(): void {
+    const target = this.liveTransitionTarget;
+    const video = this.liveVideo?.nativeElement;
+    if (
+      !this.liveTransitionFrameVisible()
+      || !target
+      || !video
+      || this.currentLiveTransport() !== target
+      || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
+      || this.liveTransitionFrameCallbackId !== null
+      || this.liveTransitionRevealTimer !== null
+    ) {
+      return;
+    }
+
+    const token = this.liveTransitionToken;
+    const frameVideo = video as HTMLVideoElement & HarborAssistantVideoFrameCallbacks;
+    const revealFrame = (): void => this.completeLiveTransportTransition(token, target);
+    if (typeof frameVideo.requestVideoFrameCallback === 'function') {
+      this.liveTransitionFrameCallbackVideo = frameVideo;
+      this.liveTransitionFrameCallbackId = frameVideo.requestVideoFrameCallback(revealFrame);
+    }
+    this.liveTransitionRevealTimer = globalThis.setTimeout(
+      revealFrame,
+      typeof frameVideo.requestVideoFrameCallback === 'function'
+        ? this.liveTransitionFallbackRevealDelayMs
+        : this.liveTransitionPaintDelayMs,
+    );
+  }
+
+  private completeLiveTransportTransition(token: number, target: HarborAssistantLiveTransport): void {
+    if (
+      token !== this.liveTransitionToken
+      || target !== this.liveTransitionTarget
+      || target !== this.currentLiveTransport()
+    ) {
+      return;
+    }
+    this.resetLiveTransitionRevealWait();
+    this.liveTransitionTarget = null;
+    this.liveTransitionFrameVisible.set(false);
+  }
+
+  private cancelLiveTransportTransition(): void {
+    this.liveTransitionToken += 1;
+    this.resetLiveTransitionRevealWait();
+    this.liveTransitionTarget = null;
+    this.liveTransitionFrameVisible.set(false);
+  }
+
+  private resetLiveTransitionRevealWait(): void {
+    const callbackVideo = this.liveTransitionFrameCallbackVideo;
+    const callbackId = this.liveTransitionFrameCallbackId;
+    this.liveTransitionFrameCallbackVideo = null;
+    this.liveTransitionFrameCallbackId = null;
+    if (callbackVideo && callbackId !== null && typeof callbackVideo.cancelVideoFrameCallback === 'function') {
+      callbackVideo.cancelVideoFrameCallback(callbackId);
+    }
+    if (this.liveTransitionRevealTimer !== null) {
+      globalThis.clearTimeout(this.liveTransitionRevealTimer);
+      this.liveTransitionRevealTimer = null;
+    }
+  }
+
+  private currentLiveTransport(): HarborAssistantLiveTransport {
+    return this.liveControlPlaybackMode() === 'webrtc' ? 'webrtc' : 'hls';
+  }
+
   private startLiveEdgeMonitor(): void {
     this.stopLiveEdgeMonitor();
     this.liveEdgeMonitor = window.setInterval(() => {
-      if (!this.hlsLiveUrl() || this.hlsLiveStatus() !== 'live') {
+      if (this.hlsLiveStatus() !== 'live') {
+        return;
+      }
+      this.syncLiveControlState();
+      if (this.liveControlPlaybackMode() === 'webrtc') {
         return;
       }
       this.seekLiveVideoToEdge();
@@ -2275,9 +2850,63 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (force || driftSeconds > this.liveEdgeMaxDriftSeconds) {
       this.setLiveVideoCurrentTime(video, targetTime);
       this.setLiveVideoPlaybackRate(video, this.defaultLivePlaybackRate);
+      this.syncLiveControlState();
       return;
     }
     this.setLiveVideoPlaybackRate(video, driftSeconds > this.liveEdgeBackoffSeconds + 4 ? 1.05 : 1);
+    this.syncLiveControlState();
+  }
+
+  private syncLiveControlState(): void {
+    const video = this.liveVideo?.nativeElement;
+    if (!video) {
+      return;
+    }
+    const sessionElapsed = this.liveSessionElapsedSeconds();
+    if (this.liveControlPlaybackMode() === 'webrtc') {
+      this.liveControlStartTime.set(0);
+      this.liveControlEndTime.set(sessionElapsed);
+      this.liveControlCurrentTime.set(
+        video.paused && this.webrtcPauseTimelineSeconds !== null
+          ? this.webrtcPauseTimelineSeconds
+          : sessionElapsed,
+      );
+      this.liveControlPaused.set(video.paused);
+      this.liveControlPlaybackRate.set(
+        video.paused ? this.userLivePlaybackRate : this.defaultLivePlaybackRate,
+      );
+      this.liveControlMuted.set(video.muted);
+      this.liveControlVolume.set(video.volume);
+      return;
+    }
+    const liveEdge = this.liveVideoEdgeSeconds(video);
+    const seekableStart = video.seekable?.length > 0 ? video.seekable.start(0) : 0;
+    const normalizedLiveEdge = liveEdge ?? (Number.isFinite(video.duration) ? video.duration : 0);
+    const timelineOffset = this.hlsControlTimelineOffset(sessionElapsed, liveEdge);
+    const controlStart = Math.max(0, (Number.isFinite(seekableStart) ? seekableStart : 0) + timelineOffset);
+    const controlEnd = liveEdge === null ? normalizedLiveEdge : sessionElapsed;
+    const controlCurrent = Number.isFinite(video.currentTime)
+      ? video.currentTime + timelineOffset
+      : controlStart;
+    this.liveControlStartTime.set(controlStart);
+    this.liveControlEndTime.set(controlEnd);
+    this.liveControlCurrentTime.set(Math.min(controlEnd, Math.max(controlStart, controlCurrent)));
+    this.liveControlPaused.set(video.paused);
+    this.liveControlPlaybackRate.set(video.playbackRate);
+    this.liveControlMuted.set(video.muted);
+    this.liveControlVolume.set(video.volume);
+  }
+
+  private hlsControlTimelineOffset(sessionElapsed: number, liveEdge: number | null): number {
+    if (liveEdge === null) {
+      return 0;
+    }
+    if (this.hlsControlTimelineOffsetSeconds === null) {
+      // Media time advances continuously, while the HLS live edge jumps when a fragment is appended.
+      // Capture the mapping once per media source so fragment updates cannot move the control backwards.
+      this.hlsControlTimelineOffsetSeconds = Math.max(0, sessionElapsed - liveEdge);
+    }
+    return this.hlsControlTimelineOffsetSeconds;
   }
 
   private resetLivePlaybackUserPause(): void {
@@ -2289,6 +2918,16 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.pendingProgrammaticLivePlayToken = null;
     this.programmaticLiveSeekTargetSeconds = null;
     this.programmaticLivePlaybackRateTarget = null;
+    this.webrtcPauseTimelineSeconds = null;
+    this.pendingHlsBehindLiveSeconds = null;
+  }
+
+  private liveSessionElapsedSeconds(): number {
+    const startedAt = Number(this.hlsLiveSession()?.started_at);
+    if (!Number.isFinite(startedAt) || startedAt <= 0) {
+      return Math.max(0, this.liveControlEndTime());
+    }
+    return Math.max(0, (Date.now() / 1_000) - startedAt);
   }
 
   private resetPlaybackSeekAnchor(): void {
@@ -2416,12 +3055,19 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     video: HTMLVideoElement,
     liveEdge = this.liveVideoEdgeSeconds(video),
   ): boolean {
+    if (this.pendingHlsBehindLiveSeconds !== null) {
+      return false;
+    }
     if (liveEdge === null || !this.liveVideoIsAtLiveEdge(video, liveEdge)) {
       return false;
     }
     this.resetLivePlaybackUserPause();
     this.resetUserLivePlaybackRate(video);
     this.hlsLiveError.set(null);
+    const session = this.hlsLiveSession();
+    if (session?.webrtc_status === 'ready' && session.webrtc_url) {
+      window.setTimeout(() => this.startWebRtcPlaybackFromSession(session), 0);
+    }
     return true;
   }
 
