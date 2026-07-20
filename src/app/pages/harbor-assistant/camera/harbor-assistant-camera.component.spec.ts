@@ -44,6 +44,7 @@ describe('Harbor Assistant camera component', () => {
       dvrStatus: jest.fn(() => of(dvrStatus())),
       dvrTimeline: jest.fn(() => of(dvrTimeline())),
       startCameraLiveSession: jest.fn(() => of(liveSession())),
+      renewCameraLiveSession: jest.fn(() => of(liveSession())),
       stopCameraLiveSession: jest.fn(() => of(liveSession({ status: 'stopped', playlist_url: null, playlist_ready: false }))),
       cameraLiveStatus: jest.fn(() => of(liveSession())),
       createSnapshotTask: jest.fn(() => snapshotSubject.asObservable()),
@@ -149,7 +150,7 @@ describe('Harbor Assistant camera component', () => {
     const fetchMock = jest.fn(() => Promise.resolve({
       headers: {
         get: (name: string) => {
-          return name === 'Location' ? '/api/beacon-webrtc/harbor-live-test/whep/session-1' : null;
+          return name === 'Location' ? '/api/harbor-link/media/harbor-live-test/whep/session-1' : null;
         },
       },
       ok: true,
@@ -180,11 +181,11 @@ describe('Harbor Assistant camera component', () => {
     try {
       await componentState.attachWhepPlayback(
         video,
-        '/api/beacon-webrtc/harbor-live-test/whep',
+        '/api/harbor-link/media/harbor-live-test/whep',
         componentState.webrtcAttachToken,
       );
 
-      expect(fetchMock).toHaveBeenCalledWith('/api/beacon-webrtc/harbor-live-test/whep', expect.objectContaining({
+      expect(fetchMock).toHaveBeenCalledWith('/api/harbor-link/media/harbor-live-test/whep', expect.objectContaining({
         body: 'offer-sdp',
         method: 'POST',
       }));
@@ -270,7 +271,7 @@ describe('Harbor Assistant camera component', () => {
     try {
       expect(componentState.startWebRtcPlaybackFromSession(liveSession({
         webrtc_status: 'ready',
-        webrtc_url: '/api/beacon-webrtc/harbor-live-test/whep',
+        webrtc_url: '/api/harbor-link/media/harbor-live-test/whep',
       }))).toBe(true);
 
       expect(transitionCanvas.drawImage).toHaveBeenCalledWith(video, 0, 0, 1280, 720);
@@ -327,6 +328,8 @@ describe('Harbor Assistant camera component', () => {
 
   it('updates the custom control immediately when WebRTC playback is paused', fakeAsync(() => {
     spectator = createComponent();
+    let currentTimeMs = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => currentTimeMs);
     let paused = false;
     const pause = jest.fn(() => {
       paused = true;
@@ -342,6 +345,7 @@ describe('Harbor Assistant camera component', () => {
       liveControlPaused: { set: (value: boolean) => void } & (() => boolean);
       liveControlPlaybackMode: { set: (value: 'webrtc') => void } & (() => string);
       liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoPlaying: () => void;
       startHlsPlaybackFromSession: jest.Mock;
       toggleLivePlaybackFromControls: () => void;
     };
@@ -350,6 +354,8 @@ describe('Harbor Assistant camera component', () => {
     componentState.liveControlPaused.set(false);
     componentState.liveVideo = { nativeElement: video };
     componentState.startHlsPlaybackFromSession = jest.fn(() => true);
+    componentState.onLiveVideoPlaying();
+    currentTimeMs += 1_000;
 
     componentState.toggleLivePlaybackFromControls();
 
@@ -362,6 +368,134 @@ describe('Harbor Assistant camera component', () => {
 
     expect(componentState.liveControlPlaybackMode()).toBe('hls-timeshift');
     expect(componentState.startHlsPlaybackFromSession).toHaveBeenCalledTimes(1);
+    discardPeriodicTasks();
+  }));
+
+  it('keeps the WebRTC timeline at zero until the first playable frame', fakeAsync(() => {
+    spectator = createComponent();
+    let currentTimeMs = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => currentTimeMs);
+    const video = fakeLiveVideo({ paused: false });
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveControlCurrentTime: () => number;
+      liveControlEndTime: () => number;
+      liveControlPlaybackMode: { set: (value: 'webrtc') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      syncLiveControlState: () => void;
+    };
+    componentState.hlsLiveSession.set(liveSession({ started_at: '1970-01-01T00:13:20.000Z' }));
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveControlPlaybackMode.set('webrtc');
+    componentState.liveVideo = { nativeElement: video };
+
+    componentState.syncLiveControlState();
+    expect(componentState.liveControlCurrentTime()).toBeCloseTo(0);
+    expect(componentState.liveControlEndTime()).toBeCloseTo(0);
+
+    currentTimeMs += 1_000;
+    componentState.syncLiveControlState();
+
+    expect(componentState.liveControlCurrentTime()).toBeCloseTo(0);
+    expect(componentState.liveControlEndTime()).toBeCloseTo(0);
+    discardPeriodicTasks();
+  }));
+
+  it('starts the visible WebRTC timeline at zero after reusing a prewarmed session', fakeAsync(() => {
+    spectator = createComponent();
+    let currentTimeMs = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => currentTimeMs);
+    const video = fakeLiveVideo({ paused: false });
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: 'live') => void };
+      liveControlCurrentTime: () => number;
+      liveControlEndTime: () => number;
+      liveControlPlaybackMode: { set: (value: 'webrtc') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoPlaying: () => void;
+      syncLiveControlState: () => void;
+    };
+    componentState.hlsLiveSession.set(liveSession({ started_at: '1970-01-01T00:13:20.000Z' }));
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveControlPlaybackMode.set('webrtc');
+    componentState.liveVideo = { nativeElement: video };
+
+    componentState.onLiveVideoPlaying();
+
+    expect(componentState.liveControlCurrentTime()).toBeCloseTo(0);
+    expect(componentState.liveControlEndTime()).toBeCloseTo(0);
+
+    currentTimeMs += 1_000;
+    componentState.syncLiveControlState();
+
+    expect(componentState.liveControlCurrentTime()).toBeCloseTo(1);
+    expect(componentState.liveControlEndTime()).toBeCloseTo(1);
+    discardPeriodicTasks();
+  }));
+
+  it('maps an RFC3339 WebRTC seek request to the matching HLS delay', fakeAsync(() => {
+    spectator = createComponent();
+    let currentTimeMs = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => currentTimeMs);
+    const video = fakeLiveVideo({ paused: false });
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      liveControlPlaybackMode: { set: (value: 'webrtc') => void } & (() => string);
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoPlaying: () => void;
+      pendingHlsBehindLiveSeconds: number | null;
+      seekLivePlaybackFromControls: (seconds: number) => void;
+      startHlsPlaybackFromSession: jest.Mock;
+      syncLiveControlState: () => void;
+    };
+    componentState.hlsLiveSession.set(liveSession({ started_at: '1970-01-01T00:13:20.000Z' }));
+    componentState.liveControlPlaybackMode.set('webrtc');
+    componentState.liveVideo = { nativeElement: video };
+    componentState.startHlsPlaybackFromSession = jest.fn(() => true);
+    componentState.onLiveVideoPlaying();
+    currentTimeMs += 200_000;
+    componentState.syncLiveControlState();
+
+    componentState.seekLivePlaybackFromControls(150);
+
+    expect(componentState.liveControlPlaybackMode()).toBe('hls-timeshift');
+    expect(componentState.pendingHlsBehindLiveSeconds).toBeCloseTo(50);
+    expect(componentState.startHlsPlaybackFromSession).toHaveBeenCalledTimes(1);
+    discardPeriodicTasks();
+  }));
+
+  it('resets the visible timeline when a new live playback starts', fakeAsync(() => {
+    spectator = createComponent();
+    let currentTimeMs = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => currentTimeMs);
+    const video = fakeLiveVideo({ paused: false });
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: 'live') => void };
+      liveControlEndTime: () => number;
+      liveControlPlaybackMode: { set: (value: 'webrtc') => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoPlaying: () => void;
+      syncLiveControlState: () => void;
+    };
+    componentState.hlsLiveSession.set(liveSession());
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveControlPlaybackMode.set('webrtc');
+    componentState.liveVideo = { nativeElement: video };
+    componentState.onLiveVideoPlaying();
+    currentTimeMs += 5_000;
+    componentState.syncLiveControlState();
+    expect(componentState.liveControlEndTime()).toBeCloseTo(5);
+
+    spectator.component.stopLive(false);
+    componentState.hlsLiveSession.set(liveSession({ session_id: 'live-test-2' }));
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveControlPlaybackMode.set('webrtc');
+    componentState.onLiveVideoPlaying();
+
+    expect(componentState.liveControlEndTime()).toBeCloseTo(0);
     discardPeriodicTasks();
   }));
 
@@ -919,7 +1053,7 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it('moves stale HLS playback back with enough live buffer', fakeAsync(() => {
+  it('moves stale HLS playback to the low-latency sync position', fakeAsync(() => {
     spectator = createComponent();
     const video = fakeLiveVideo({
       currentTime: 8,
@@ -932,6 +1066,7 @@ describe('Harbor Assistant camera component', () => {
       } as unknown as TimeRanges,
     });
     const componentState = spectator.component as unknown as {
+      hls: Hls | null;
       hlsLiveUrl: { set: (value: string | null) => void };
       hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
@@ -940,10 +1075,11 @@ describe('Harbor Assistant camera component', () => {
     componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
     componentState.hlsLiveStatus.set('live');
     componentState.liveVideo = { nativeElement: video };
+    componentState.hls = { liveSyncPosition: 59.4, destroy: jest.fn() } as unknown as Hls;
 
     componentState.seekLiveVideoToEdge();
 
-    expect(video.currentTime).toBeCloseTo(54);
+    expect(video.currentTime).toBeCloseTo(59.4);
     expect(video.playbackRate).toBe(1);
     discardPeriodicTasks();
   }));
@@ -1021,7 +1157,7 @@ describe('Harbor Assistant camera component', () => {
       start: jest.fn(() => 0),
     } as unknown as TimeRanges;
     const video = fakeLiveVideo({
-      currentTime: 88,
+      currentTime: 100,
       paused: false,
       seekable: seekableRange,
     });
@@ -1031,24 +1167,32 @@ describe('Harbor Assistant camera component', () => {
       liveControlEndTime: () => number;
       liveControlPlaybackMode: { set: (value: 'hls-timeshift') => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoPlaying: () => void;
       syncLiveControlState: () => void;
     };
     componentState.hlsLiveSession.set(liveSession({ started_at: '800' }));
     componentState.liveControlPlaybackMode.set('hls-timeshift');
     componentState.liveVideo = { nativeElement: video };
+    componentState.onLiveVideoPlaying();
 
+    expect(componentState.liveControlCurrentTime()).toBeCloseTo(0);
+    expect(componentState.liveControlEndTime()).toBeCloseTo(0);
+
+    currentTimeMs += 20_000;
+    liveEdgeSeconds = 120;
+    video.currentTime = 108;
     componentState.syncLiveControlState();
 
-    expect(componentState.liveControlCurrentTime()).toBeCloseTo(188);
-    expect(componentState.liveControlEndTime()).toBeCloseTo(200);
+    expect(componentState.liveControlCurrentTime()).toBeCloseTo(8);
+    expect(componentState.liveControlEndTime()).toBeCloseTo(20);
 
     currentTimeMs += 200;
-    liveEdgeSeconds = 102;
-    video.currentTime = 88.2;
+    liveEdgeSeconds = 122;
+    video.currentTime = 108.2;
     componentState.syncLiveControlState();
 
-    expect(componentState.liveControlCurrentTime()).toBeCloseTo(188.2);
-    expect(componentState.liveControlEndTime()).toBeCloseTo(200.2);
+    expect(componentState.liveControlCurrentTime()).toBeCloseTo(8.2);
+    expect(componentState.liveControlEndTime()).toBeCloseTo(20.2);
     discardPeriodicTasks();
   }));
 
@@ -1063,7 +1207,7 @@ describe('Harbor Assistant camera component', () => {
       start: jest.fn(() => 0),
     } as unknown as TimeRanges;
     const video = fakeLiveVideo({
-      currentTime: 88,
+      currentTime: 100,
       paused: false,
       seekable: seekableRange,
     });
@@ -1073,21 +1217,27 @@ describe('Harbor Assistant camera component', () => {
       liveControlPlaybackMode: { set: (value: 'hls-timeshift') => void };
       liveControlStartTime: { set: (value: number) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoPlaying: () => void;
       seekLivePlaybackFromControls: (seconds: number) => void;
       syncLiveControlState: () => void;
     };
     componentState.hlsLiveSession.set(liveSession({ started_at: '800' }));
     componentState.liveControlPlaybackMode.set('hls-timeshift');
     componentState.liveVideo = { nativeElement: video };
+    componentState.onLiveVideoPlaying();
+
+    currentTimeMs += 200_000;
+    liveEdgeSeconds = 300;
+    video.currentTime = 288;
     componentState.syncLiveControlState();
 
     currentTimeMs += 200;
-    liveEdgeSeconds = 102;
+    liveEdgeSeconds = 302;
     componentState.liveControlStartTime.set(100);
     componentState.liveControlEndTime.set(200.2);
     componentState.seekLivePlaybackFromControls(150);
 
-    expect(video.currentTime).toBeCloseTo(50);
+    expect(video.currentTime).toBeCloseTo(250);
     discardPeriodicTasks();
   }));
 
@@ -1186,7 +1336,7 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it('returns delayed HLS playback to normal rate after catching up to live edge', fakeAsync(() => {
+  it('keeps 2x HLS playback at exactly a one-second visible gap', fakeAsync(() => {
     spectator = createComponent();
     const bufferedRange = fakeTimeRanges([[0, 90]]);
     const video = fakeLiveVideo({
@@ -1196,35 +1346,41 @@ describe('Harbor Assistant camera component', () => {
       buffered: bufferedRange,
       seekable: bufferedRange,
     });
+    const session = liveSession({
+      webrtc_status: 'ready',
+      webrtc_url: '/api/harbor-link/media/live-test/whep',
+    });
     const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
       hlsLiveUrl: { set: (value: string | null) => void };
       hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveControlCurrentTime: { set: (value: number) => void };
+      liveControlEndTime: { set: (value: number) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoRateChange: () => void;
       onLiveVideoSeeked: () => void;
       seekLiveVideoToEdge: (force?: boolean) => void;
+      startWebRtcPlaybackFromSession: jest.Mock;
     };
+    componentState.hlsLiveSession.set(session);
     componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
     componentState.hlsLiveStatus.set('live');
     componentState.liveVideo = { nativeElement: video };
+    componentState.startWebRtcPlaybackFromSession = jest.fn(() => true);
 
     componentState.onLiveVideoSeeked();
     video.playbackRate = 2;
     componentState.onLiveVideoRateChange();
-    video.currentTime = 89.5;
+    componentState.liveControlCurrentTime.set(99);
+    componentState.liveControlEndTime.set(100);
     componentState.seekLiveVideoToEdge();
 
-    expect(video.playbackRate).toBe(1);
-
-    video.currentTime = 50;
-    componentState.seekLiveVideoToEdge(true);
-
-    expect(video.currentTime).toBe(84);
-    expect(video.playbackRate).toBe(1);
+    expect(video.playbackRate).toBe(2);
+    expect(componentState.startWebRtcPlaybackFromSession).not.toHaveBeenCalled();
     discardPeriodicTasks();
   }));
 
-  it('returns delayed HLS playback to normal rate at the stable HLS live sync position', fakeAsync(() => {
+  it('keeps 2x HLS active at the stable sync position while the visible gap exceeds one second', fakeAsync(() => {
     spectator = createComponent();
     const bufferedRange = fakeTimeRanges([[0, 90]]);
     const video = fakeLiveVideo({
@@ -1236,21 +1392,36 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hls: Hls | null;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
       hlsLiveUrl: { set: (value: string | null) => void };
       hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveControlCurrentTime: { set: (value: number) => void };
+      liveControlEndTime: { set: (value: number) => void };
+      liveControlPlaybackMode: { set: (value: 'hls-timeshift') => void } & (() => string);
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoRateChange: () => void;
       onLiveVideoSeeked: () => void;
       onLiveVideoTimeUpdate: () => void;
+      startWebRtcPlaybackFromSession: jest.Mock;
+      syncLiveControlState: jest.Mock;
     };
+    componentState.hlsLiveSession.set(liveSession({
+      webrtc_status: 'ready',
+      webrtc_url: '/api/harbor-link/media/live-test/whep',
+    }));
     componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
     componentState.hlsLiveStatus.set('live');
+    componentState.liveControlPlaybackMode.set('hls-timeshift');
     componentState.liveVideo = { nativeElement: video };
     componentState.hls = { liveSyncPosition: 88, destroy: jest.fn() } as unknown as Hls;
+    componentState.startWebRtcPlaybackFromSession = jest.fn(() => true);
 
     componentState.onLiveVideoSeeked();
     video.playbackRate = 2;
     componentState.onLiveVideoRateChange();
+    componentState.liveControlCurrentTime.set(98.9);
+    componentState.liveControlEndTime.set(100);
+    componentState.syncLiveControlState = jest.fn();
     video.currentTime = 86.5;
     componentState.onLiveVideoTimeUpdate();
 
@@ -1259,6 +1430,92 @@ describe('Harbor Assistant camera component', () => {
     video.currentTime = 87.1;
     componentState.onLiveVideoTimeUpdate();
 
+    expect(video.playbackRate).toBe(2);
+    expect(componentState.liveControlPlaybackMode()).toBe('hls-timeshift');
+    expect(componentState.startWebRtcPlaybackFromSession).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('switches 2x HLS playback to WebRTC below a one-second visible gap', fakeAsync(() => {
+    spectator = createComponent();
+    const bufferedRange = fakeTimeRanges([[0, 90]]);
+    const video = fakeLiveVideo({
+      currentTime: 80,
+      paused: false,
+      playbackRate: 1,
+      buffered: bufferedRange,
+      seekable: bufferedRange,
+    });
+    const session = liveSession({
+      webrtc_status: 'ready',
+      webrtc_url: '/api/harbor-link/media/live-test/whep',
+    });
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveUrl: { set: (value: string | null) => void };
+      hlsLiveStatus: { set: (value: 'live') => void };
+      liveControlCurrentTime: { set: (value: number) => void };
+      liveControlEndTime: { set: (value: number) => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      onLiveVideoRateChange: () => void;
+      onLiveVideoSeeked: () => void;
+      onLiveVideoTimeUpdate: () => void;
+      startWebRtcPlaybackFromSession: jest.Mock;
+      syncLiveControlState: jest.Mock;
+    };
+    componentState.hlsLiveSession.set(session);
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveVideo = { nativeElement: video };
+    componentState.startWebRtcPlaybackFromSession = jest.fn(() => true);
+
+    componentState.onLiveVideoSeeked();
+    video.playbackRate = 2;
+    componentState.onLiveVideoRateChange();
+    componentState.liveControlCurrentTime.set(99.1);
+    componentState.liveControlEndTime.set(100);
+    componentState.syncLiveControlState = jest.fn();
+    componentState.onLiveVideoTimeUpdate();
+
+    expect(componentState.startWebRtcPlaybackFromSession).toHaveBeenCalledWith(session);
+    expect(video.playbackRate).toBe(1);
+    discardPeriodicTasks();
+  }));
+
+  it('switches HLS playback to WebRTC when the user seeks to the visible right edge', fakeAsync(() => {
+    spectator = createComponent();
+    const bufferedRange = fakeTimeRanges([[0, 90]]);
+    const video = fakeLiveVideo({
+      currentTime: 70,
+      paused: false,
+      playbackRate: 2,
+      buffered: bufferedRange,
+      seekable: bufferedRange,
+    });
+    const session = liveSession({
+      webrtc_status: 'ready',
+      webrtc_url: '/api/harbor-link/media/live-test/whep',
+    });
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      liveControlEndTime: { set: (value: number) => void };
+      liveControlPlaybackMode: { set: (value: 'hls-timeshift') => void };
+      liveControlStartTime: { set: (value: number) => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      seekLivePlaybackFromControls: (seconds: number) => void;
+      startWebRtcPlaybackFromSession: jest.Mock;
+    };
+    componentState.hlsLiveSession.set(session);
+    componentState.liveControlPlaybackMode.set('hls-timeshift');
+    componentState.liveControlStartTime.set(0);
+    componentState.liveControlEndTime.set(100);
+    componentState.liveVideo = { nativeElement: video };
+    componentState.startWebRtcPlaybackFromSession = jest.fn(() => true);
+
+    componentState.seekLivePlaybackFromControls(100);
+
+    expect(componentState.startWebRtcPlaybackFromSession).toHaveBeenCalledWith(session);
+    expect(video.currentTime).toBe(70);
     expect(video.playbackRate).toBe(1);
     discardPeriodicTasks();
   }));
@@ -1273,15 +1530,25 @@ describe('Harbor Assistant camera component', () => {
       buffered: bufferedRange,
       seekable: bufferedRange,
     });
+    const session = liveSession({
+      webrtc_status: 'ready',
+      webrtc_url: '/api/harbor-link/media/live-test/whep',
+    });
     const componentState = spectator.component as unknown as {
       hls: Hls | null;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
       hlsLiveUrl: { set: (value: string | null) => void };
       hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      liveControlCurrentTime: { set: (value: number) => void };
+      liveControlEndTime: { set: (value: number) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoRateChange: () => void;
       onLiveVideoSeeked: () => void;
       startLiveEdgeMonitor: () => void;
+      startWebRtcPlaybackFromSession: jest.Mock;
+      syncLiveControlState: jest.Mock;
     };
+    componentState.hlsLiveSession.set(session);
     componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
     componentState.hlsLiveStatus.set('live');
     componentState.liveVideo = { nativeElement: video };
@@ -1290,6 +1557,10 @@ describe('Harbor Assistant camera component', () => {
     componentState.onLiveVideoSeeked();
     video.playbackRate = 2;
     componentState.onLiveVideoRateChange();
+    componentState.liveControlCurrentTime.set(99.1);
+    componentState.liveControlEndTime.set(100);
+    componentState.startWebRtcPlaybackFromSession = jest.fn(() => true);
+    componentState.syncLiveControlState = jest.fn();
     video.currentTime = 87.1;
     componentState.startLiveEdgeMonitor();
 
@@ -1297,11 +1568,12 @@ describe('Harbor Assistant camera component', () => {
     expect(video.playbackRate).toBe(2);
 
     tick(1);
+    expect(componentState.startWebRtcPlaybackFromSession).toHaveBeenCalledWith(session);
     expect(video.playbackRate).toBe(1);
     discardPeriodicTasks();
   }));
 
-  it('returns to live edge tracking when the user seeks to the right edge', fakeAsync(() => {
+  it('keeps a native HLS seek delayed until the custom control requests WebRTC', fakeAsync(() => {
     spectator = createComponent();
     const bufferedRange = fakeTimeRanges([[0, 90]]);
     const video = fakeLiveVideo({
@@ -1326,7 +1598,7 @@ describe('Harbor Assistant camera component', () => {
     video.currentTime = 50;
     componentState.seekLiveVideoToEdge(true);
 
-    expect(video.currentTime).toBe(84);
+    expect(video.currentTime).toBe(50);
     expect(video.playbackRate).toBe(1);
     discardPeriodicTasks();
   }));
@@ -1357,7 +1629,7 @@ describe('Harbor Assistant camera component', () => {
     video.currentTime = 30;
     componentState.seekLiveVideoToEdge(true);
 
-    expect(video.currentTime).toBe(84);
+    expect(video.currentTime).toBe(89);
     expect(video.playbackRate).toBe(1);
     discardPeriodicTasks();
   }));
@@ -1376,8 +1648,14 @@ describe('Harbor Assistant camera component', () => {
         config?: {
           backBufferLength?: number;
           liveMaxLatencyDurationCount?: number;
+          lowLatencyMode?: boolean;
           maxBufferLength?: number;
           maxMaxBufferLength?: number;
+          maxLiveSyncPlaybackRate?: number;
+        };
+        userConfig?: {
+          liveMaxLatencyDurationCount?: number;
+          liveSyncDurationCount?: number;
         };
       };
       hlsLiveUrl: { set: (value: string | null) => void };
@@ -1412,8 +1690,12 @@ describe('Harbor Assistant camera component', () => {
     expect(video.canPlayType).not.toHaveBeenCalled();
     expect(componentState.hls?.config?.backBufferLength).toBe(Number.POSITIVE_INFINITY);
     expect(componentState.hls?.config?.liveMaxLatencyDurationCount).toBe(Number.POSITIVE_INFINITY);
+    expect(componentState.hls?.config?.lowLatencyMode).toBe(true);
     expect(componentState.hls?.config?.maxBufferLength).toBe(120);
     expect(componentState.hls?.config?.maxMaxBufferLength).toBe(600);
+    expect(componentState.hls?.config?.maxLiveSyncPlaybackRate).toBe(1);
+    expect(componentState.hls?.userConfig?.liveMaxLatencyDurationCount).toBeUndefined();
+    expect(componentState.hls?.userConfig?.liveSyncDurationCount).toBeUndefined();
     discardPeriodicTasks();
   }));
 
@@ -1931,10 +2213,15 @@ describe('Harbor Assistant camera component', () => {
     const startSubject = new Subject<HarborAssistantSearchDvrStatusResponse>();
     api.startDvrRecording = jest.fn(() => startSubject.asObservable());
     spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      selectedStreamProfile: { set: (value: 'sub' | 'main') => void };
+    };
+    componentState.selectedStreamProfile.set('main');
 
     spectator.component.startRecording();
     spectator.detectChanges();
 
+    expect(api.startDvrRecording).toHaveBeenCalledWith('cam-1', 'main');
     expect(spectator.query('.recording-badge')).toHaveText('Starting');
 
     api.dvrStatus = jest.fn(() => of(dvrStatus('recording')));

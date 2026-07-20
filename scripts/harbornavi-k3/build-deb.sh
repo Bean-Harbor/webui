@@ -89,24 +89,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    location ~ ^/api/beacon-live/cameras/([A-Za-z0-9_.-]+)/live/(live-[A-Za-z0-9]+)/(index\.m3u8|init\.mp4|segment_[0-9][0-9][0-9][0-9][0-9]\.m4s)$ {
-        alias /run/harbornavi/live/$1/$2/$3;
-        autoindex off;
-        types {
-            application/vnd.apple.mpegurl m3u8;
-            video/mp4 mp4;
-            video/iso.segment m4s;
-        }
-        default_type application/octet-stream;
-        add_header Cache-Control "no-store";
-        add_header X-Content-Type-Options "nosniff";
-    }
-
-    location /api/beacon-live/ {
-        return 404;
-    }
-
-    location ^~ /api/beacon-webrtc/ {
+    location ^~ /api/harbor-link/media/ {
         proxy_pass http://127.0.0.1:8889/;
         proxy_http_version 1.1;
         proxy_buffering off;
@@ -117,7 +100,21 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_redirect ~^/(.+)$ /api/beacon-webrtc/$1;
+        proxy_redirect ~^/(.+)$ /api/harbor-link/media/$1;
+    }
+
+    location ^~ /api/harbor-link/hls/ {
+        proxy_pass http://127.0.0.1:8888/;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect ~^/(.+)$ /api/harbor-link/hls/$1;
     }
 
     location /api/beacon/ {

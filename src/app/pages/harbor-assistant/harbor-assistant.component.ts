@@ -555,7 +555,7 @@ export class HarborAssistantComponent implements OnInit {
 
   protected readonly scanCredentialForm = this.fb.group({
     username: [''],
-    password: ['', Validators.required],
+    password: [''],
   });
 
   protected readonly ruleDraftForm = this.fb.group({
@@ -1082,7 +1082,9 @@ export class HarborAssistantComponent implements OnInit {
       username: scanValue.username.trim() || this.defaults().rtsp_username || '',
       password: '',
     });
-    this.actionMessage.set(T('Enter the camera password before connecting.'));
+    this.actionMessage.set(result.requires_auth
+      ? T('Enter the camera password before connecting.')
+      : T('Confirm the discovered camera before connecting.'));
   }
 
   protected isScanCredentialOpen(result: DiscoveryScanResultItem): boolean {
@@ -1104,13 +1106,13 @@ export class HarborAssistantComponent implements OnInit {
   }
 
   protected connectScanResult(result: DiscoveryScanResultItem): void {
-    if (this.scanCredentialForm.invalid) {
+    const value = this.scanCredentialForm.getRawValue();
+    if (result.requires_auth && !value.password.trim()) {
       this.scanCredentialForm.markAllAsTouched();
       this.scanCredentialError.set(T('Enter the camera password.'));
       return;
     }
 
-    const value = this.scanCredentialForm.getRawValue();
     const scanValue = this.scanForm.getRawValue();
     const actionId = `scan-connect:${result.candidate_id}`;
     this.actionInProgress.set(actionId);
@@ -1326,7 +1328,7 @@ export class HarborAssistantComponent implements OnInit {
         model: this.emptyToNull(value.model),
         ip_address: this.emptyToNull(value.ipAddress),
         snapshot_url: this.emptyToNull(value.snapshotUrl),
-        primary_stream_url: this.emptyToNull(value.primaryStreamUrl),
+        primary_stream_url: this.metadataPrimaryStreamUrl(device, value.primaryStreamUrl),
         rtsp_path: this.emptyToNull(value.rtspPath),
         rtsp_port: this.parseOptionalNumber(value.rtspPort),
         requires_auth: this.parseOptionalBoolean(value.requiresAuth),
@@ -5147,6 +5149,28 @@ export class HarborAssistantComponent implements OnInit {
   private emptyToNull(value: string): string | null {
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
+  }
+
+  private metadataPrimaryStreamUrl(
+    device: CameraDevice,
+    value: string,
+  ): string | null | undefined {
+    const candidate = value.trim();
+    const current = (device.primary_stream?.url ?? device.profile?.rtsp_url ?? '').trim();
+    if (this.isHarborLinkStreamPlaceholder(candidate) || candidate === current) {
+      return undefined;
+    }
+    if (!candidate) {
+      return current && !this.isHarborLinkStreamPlaceholder(current) ? null : undefined;
+    }
+    return candidate;
+  }
+
+  private isHarborLinkStreamPlaceholder(value: string): boolean {
+    const normalized = value.trim().toLowerCase();
+    return normalized.startsWith('harborlink://')
+      || normalized === '__harbor_redacted_rtsp_url__'
+      || normalized === '[redacted]';
   }
 
   private parseOptionalNumber(value: string): number | null {

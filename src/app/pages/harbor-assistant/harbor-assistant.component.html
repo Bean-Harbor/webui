@@ -1163,11 +1163,11 @@
                       <p class="muted">{{ result.ip }}:{{ result.port }} · {{ result.protocol | translate }}</p>
                       <p class="muted">{{ result.note | translate }}</p>
                     </div>
-                    @if (result.requires_auth && !result.registered) {
+                    @if (!result.registered) {
                       <div class="scan-result-actions">
                         @if (!isScanCredentialOpen(result)) {
                           <button mat-button type="button" (click)="prepareManualFromScan(result)">
-                            {{ 'Enter password to connect' | translate }}
+                            {{ (result.requires_auth ? 'Enter password to connect' : 'Connect camera') | translate }}
                           </button>
                         }
                       </div>
@@ -1177,31 +1177,33 @@
                             <mat-label>{{ 'Username' | translate }}</mat-label>
                             <input matInput formControlName="username" autocomplete="username" />
                           </mat-form-field>
-                          <mat-form-field>
-                            <mat-label>{{ 'Password' | translate }}</mat-label>
-                            <input
-                              matInput
-                              [type]="scanCredentialPasswordVisible() ? 'text' : 'password'"
-                              formControlName="password"
-                              autocomplete="new-password"
-                            />
-                            <button
-                              mat-icon-button
-                              matSuffix
-                              class="password-visibility-button"
-                              type="button"
-                              [attr.aria-label]="(scanCredentialPasswordVisible() ? 'Hide password' : 'Show password') | translate"
-                              [attr.title]="(scanCredentialPasswordVisible() ? 'Hide password' : 'Show password') | translate"
-                              (click)="toggleScanCredentialPasswordVisible()"
-                            >
-                              <tn-icon
-                                library="mdi"
-                                [name]="scanCredentialPasswordVisible() ? 'eye-off' : 'eye'"
-                                customSize="18px"
-                              ></tn-icon>
-                            </button>
-                          </mat-form-field>
-                          <button mat-button color="primary" type="submit" [disabled]="actionInProgress() !== null || scanCredentialForm.invalid">
+                          @if (result.requires_auth) {
+                            <mat-form-field>
+                              <mat-label>{{ 'Password' | translate }}</mat-label>
+                              <input
+                                matInput
+                                [type]="scanCredentialPasswordVisible() ? 'text' : 'password'"
+                                formControlName="password"
+                                autocomplete="new-password"
+                              />
+                              <button
+                                mat-icon-button
+                                matSuffix
+                                class="password-visibility-button"
+                                type="button"
+                                [attr.aria-label]="(scanCredentialPasswordVisible() ? 'Hide password' : 'Show password') | translate"
+                                [attr.title]="(scanCredentialPasswordVisible() ? 'Hide password' : 'Show password') | translate"
+                                (click)="toggleScanCredentialPasswordVisible()"
+                              >
+                                <tn-icon
+                                  library="mdi"
+                                  [name]="scanCredentialPasswordVisible() ? 'eye-off' : 'eye'"
+                                  customSize="18px"
+                                ></tn-icon>
+                              </button>
+                            </mat-form-field>
+                          }
+                          <button mat-button color="primary" type="submit" [disabled]="actionInProgress() !== null">
                             @if (actionBusy('scan-connect:' + result.candidate_id)) {
                               {{ 'Connecting' | translate }}
                             } @else {

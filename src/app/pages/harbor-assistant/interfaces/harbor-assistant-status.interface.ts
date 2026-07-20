@@ -31,9 +31,14 @@ export interface HomeAssistantStatusResponse {
   configured: boolean;
   enabled: boolean;
   base_url: string;
+  managed_by_harborlink?: boolean;
+  harborlink_available?: boolean;
   token_configured: boolean;
   token_redacted: boolean;
   exposed_domains: string[];
+  allowed_entities?: string[];
+  allowed_cameras?: string[];
+  camera_entity_bindings?: Record<string, string>;
   status: string;
   last_error?: string | null;
   last_test_at?: string | null;
@@ -46,9 +51,13 @@ export interface HomeAssistantStatusResponse {
 
 export interface HomeAssistantConfigPayload {
   enabled: boolean;
-  base_url: string;
+  base_url?: string;
   access_token?: string | null;
-  exposed_domains: string[];
+  exposed_domains?: string[];
+  allowed_entities?: string[];
+  allowed_cameras?: string[];
+  camera_entity_bindings?: Record<string, string>;
+  clear_access_token?: boolean;
 }
 
 export interface HomeAssistantConfigResponse {

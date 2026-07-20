@@ -90,10 +90,10 @@ describe('Harbor Assistant search result helpers', () => {
       .toBe('/api/harbor-beacon/cameras/camera-main/snapshot.jpg');
     expect(harborAssistantSearchSameOriginAdminUrl('/api/harbor-beacon/cameras/camera-main/snapshot.jpg'))
       .toBe('/api/harbor-beacon/cameras/camera-main/snapshot.jpg');
-    expect(harborAssistantSearchSameOriginAdminUrl('/api/beacon-live/cameras/cam-1/live/live-test/index.m3u8'))
-      .toBe('/api/beacon-live/cameras/cam-1/live/live-test/index.m3u8');
-    expect(harborAssistantSearchSameOriginAdminUrl('/api/beacon-webrtc/harbor-live-1/whep'))
-      .toBe('/api/beacon-webrtc/harbor-live-1/whep');
+    expect(harborAssistantSearchSameOriginAdminUrl('/api/harbor-link/hls/harbor-live-1/index.m3u8'))
+      .toBe('/api/harbor-link/hls/harbor-live-1/index.m3u8');
+    expect(harborAssistantSearchSameOriginAdminUrl('/api/harbor-link/media/harbor-live-1/whep'))
+      .toBe('/api/harbor-link/media/harbor-live-1/whep');
     expect(harborAssistantSearchSameOriginAdminUrl('http://127.0.0.1/ui/assets/harbor-fixtures/public-fixture-dvr.jpg'))
       .toBe('/ui/assets/harbor-fixtures/public-fixture-dvr.jpg');
   });
