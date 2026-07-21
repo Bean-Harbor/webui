@@ -49,8 +49,8 @@
   display: grid;
   gap: 16px;
   grid-template-areas:
-    "viewer assistant"
-    "library assistant";
+    'viewer assistant'
+    'library assistant';
   grid-template-columns: minmax(0, 1fr) minmax(360px, 460px);
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;

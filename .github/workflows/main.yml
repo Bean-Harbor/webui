@@ -61,7 +61,7 @@ jobs:
   test-ux-team:
     name: Run tests (UX Team - Self-hosted)
     needs: [install, check-ux-team]
-    if: needs.check-ux-team.outputs.is_member == 'true'
+    if: needs.check-ux-team.outputs.is_member == 'true' && github.repository == 'truenas/webui'
     strategy:
       fail-fast: false
     runs-on: self-hosted
@@ -89,7 +89,9 @@ jobs:
     if: |
       always() &&
       needs.install.result == 'success' &&
-      (github.event_name != 'pull_request' || needs.check-ux-team.outputs.is_member != 'true')
+      (github.repository != 'truenas/webui' ||
+       github.event_name != 'pull_request' ||
+       needs.check-ux-team.outputs.is_member != 'true')
     strategy:
       fail-fast: false
     runs-on: ubuntu-latest

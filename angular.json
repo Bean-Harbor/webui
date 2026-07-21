@@ -94,7 +94,7 @@
                 },
                 {
                   "replace": "src/app/app.component.ts",
-                  "with": "src/app/app.component.harbornavi.ts"
+                  "with": "src/app/app-harbornavi.component.ts"
                 },
                 {
                   "replace": "src/app/app.routes.ts",

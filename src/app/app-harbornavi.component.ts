@@ -1,8 +1,8 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { Title } from '@angular/platform-browser';
 import { RouterOutlet } from '@angular/router';
-import { LanguageService } from 'app/modules/language/language.service';
 import { WINDOW } from 'app/helpers/window.helper';
+import { LanguageService } from 'app/modules/language/language.service';
 
 @Component({
   selector: 'ix-root',

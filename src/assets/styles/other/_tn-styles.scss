@@ -1,7 +1,7 @@
-@use "@angular/material" as mat;
-@use "sass:color";
-@use "sass:map";
-@import "scss-imports/cssvars";
+@use '@angular/material' as mat;
+@use 'sass:color';
+@use 'sass:map';
+@import 'scss-imports/cssvars';
 $standard-height: 40px;
 @include mat.all-component-typographies();
 @include mat.elevation-classes();
@@ -9,25 +9,25 @@ $standard-height: 40px;
 @include mat.slide-toggle-density(-1);
 @include mat.radio-density(-1);
 @include mat.checkbox-density(-1);
-@import "angular15";
-@import "material-overrides";
+@import 'angular15';
+@import 'material-overrides';
 
 $ix-primary: mat.m2-define-palette($md-primary);
 $ix-accent: mat.m2-define-palette($md-accent);
 
 $ix-typography: mat.m2-define-typography-config($body-1: mat.m2-define-typography-level($font-size: 0.875rem,
-      $font-family: var(--font-family-body),
-    ),
-    $body-2: mat.m2-define-typography-level($font-size: 0.875rem,
-      $font-family: var(--font-family-body),
-    ),
-  );
+$font-family: var(--font-family-body),
+),
+$body-2: mat.m2-define-typography-level($font-size: 0.875rem,
+$font-family: var(--font-family-body),
+),
+);
 
 $ix-theme: mat.m2-define-light-theme((color: (primary: $ix-primary,
-        accent: $ix-accent,
-      ),
-      typography: $ix-typography,
-    ));
+accent: $ix-accent,
+),
+typography: $ix-typography,
+));
 
 $primary-dark: color.adjust(map.get($md-primary, 500), $lightness: -8%);
 
@@ -477,11 +477,11 @@ $primary-dark: color.adjust(map.get($md-primary, 500), $lightness: -8%);
   }
 
   .fn-theme-tooltip {
-    @import "ngx-popperjs/scss/theme";
+    @import 'ngx-popperjs/scss/theme';
     @include ngx-popperjs-theme(var(--primary),
-      var(--primary-txt),
-      400px,
-      20001);
+    var(--primary-txt),
+    400px,
+    20001);
   }
 
   .fn-theme-red {
@@ -543,7 +543,7 @@ $primary-dark: color.adjust(map.get($md-primary, 500), $lightness: -8%);
 
   .mdc-button--outlined {
     background-color: transparent !important;
-    border: 1px solid #A4ACB9 !important;
+    border: 1px solid #a4acb9 !important;
     border-radius: 25px !important;
     height: 36px;
     line-height: 36px;
@@ -589,7 +589,7 @@ $primary-dark: color.adjust(map.get($md-primary, 500), $lightness: -8%);
     }
   }
 
-  .mat-mdc-button[color="default"] {
+  .mat-mdc-button[color='default'] {
     @include variable(color, --fg2, $fg2, !important);
   }
 
@@ -677,11 +677,11 @@ $primary-dark: color.adjust(map.get($md-primary, 500), $lightness: -8%);
     color: var(--accent);
   }
 
-  input[type="number"] {
+  input[type='number'] {
     appearance: textfield !important;
   }
 
-  input[type="number"]::-webkit-inner-spin-button {
+  input[type='number']::-webkit-inner-spin-button {
     appearance: none;
   }
 
@@ -857,10 +857,10 @@ $primary-dark: color.adjust(map.get($md-primary, 500), $lightness: -8%);
 
   // Disabled form fields
   .form-element .mat-mdc-text-field-wrapper[disabled],
-  .form-element input[type="email"][disabled],
-  .form-element input[type="number"][disabled],
-  .form-element input[type="password"][disabled],
-  .form-element input[type="text"][disabled],
+  .form-element input[type='email'][disabled],
+  .form-element input[type='number'][disabled],
+  .form-element input[type='password'][disabled],
+  .form-element input[type='text'][disabled],
   .form-element select[disabled],
   .form-element textarea[disabled] {
     opacity: var(--disabled-opacity);
@@ -891,8 +891,8 @@ $primary-dark: color.adjust(map.get($md-primary, 500), $lightness: -8%);
   }
 }
 
-ix-tree-node[aria-level="2"],
-ix-nested-tree-node[aria-level="2"] {
+ix-tree-node[aria-level='2'],
+ix-nested-tree-node[aria-level='2'] {
   ix-bootenv-node-item {
     padding-left: 33px;
   }

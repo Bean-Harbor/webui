@@ -6,12 +6,12 @@
 
 // Color Palette
 $fm-bg-canvas: #f8fafc;
-$fm-bg-surface: #ffffff;
+$fm-bg-surface: #fff;
 $fm-bg-surface-hover: #f1f5f9;
 $fm-bg-surface-selected: rgba(59, 130, 246, 0.08);
 
 $fm-border-subtle: rgba(0, 0, 0, 0.06);
-$fm-border-default: rgba(0, 0, 0, 0.10);
+$fm-border-default: rgba(0, 0, 0, 0.1);
 
 $fm-text-primary: #1e293b;
 $fm-text-secondary: #64748b;
@@ -377,11 +377,11 @@ $fm-transition-normal: 200ms ease;
 
         &:hover {
           transform: translateY(-50%) scale(1.1);
-
-          ix-icon {
-            color: $fm-text-primary;
-          }
         }
+      }
+
+      .eject-button:hover ix-icon {
+        color: $fm-text-primary;
       }
 
       &:hover {
@@ -440,7 +440,6 @@ $fm-transition-normal: 200ms ease;
 }
 
 @keyframes pulse {
-
   0%,
   100% {
     opacity: 0.5;
@@ -494,7 +493,7 @@ $fm-transition-normal: 200ms ease;
   .empty-description {
     font-size: $fm-font-size-md;
     color: $fm-text-secondary;
-    margin: 0 0 $fm-space-5 0;
+    margin: 0 0 $fm-space-5;
     max-width: 320px;
     line-height: 1.5;
   }
@@ -701,7 +700,6 @@ $fm-transition-normal: 200ms ease;
 }
 
 .list-item.selected {
-
   .col-size,
   .col-type {
     color: $fm-text-secondary;
@@ -863,6 +861,7 @@ $fm-transition-normal: 200ms ease;
     opacity: 0;
     transform: translateY(-8px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);

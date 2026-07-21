@@ -9,8 +9,7 @@
 /*---- Globals -----*/
 html {
   font-size: 87.5%
-    /* 14px */
-  ;
+    /* 14px */;
 }
 
 html,
@@ -451,13 +450,13 @@ input:-webkit-autofill {
 
 
 * {
-  --sb-track-color: #ffffff;
+  --sb-track-color: #fff;
   --sb-thumb-color: #6715ff;
   --sb-size: 12px;
 }
 
 *::-webkit-scrollbar {
-  width: var(--sb-size)
+  width: var(--sb-size);
 }
 
 *::-webkit-scrollbar-track {

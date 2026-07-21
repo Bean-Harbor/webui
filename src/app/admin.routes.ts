@@ -127,7 +127,7 @@ export const adminRoutes: Routes = [
       {
         path: 'featured-photos/admin',
         loadComponent: () => import('app/pages/featured-photos/featured-photos-admin.component')
-          .then((m) => m.FeaturedPhotosAdminComponent),
+          .then((module) => module.FeaturedPhotosAdminComponent),
         data: { title: T('Featured Photos'), breadcrumb: T('Featured Photos') },
       },
     ],
