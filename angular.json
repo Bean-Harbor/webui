@@ -106,11 +106,11 @@
                 },
                 {
                   "replace": "src/app/modules/page-header/page-title-header/page-header.component.ts",
-                  "with": "src/app/modules/page-header/page-title-header/page-header.component.harbornavi.ts"
+                  "with": "src/app/modules/page-header/page-title-header/page-header-harbornavi.component.ts"
                 },
                 {
                   "replace": "src/app/pages/file-manager/folder-picker-dialog/folder-picker-dialog.component.ts",
-                  "with": "src/app/pages/file-manager/folder-picker-dialog/folder-picker-dialog.component.harbornavi.ts"
+                  "with": "src/app/pages/file-manager/folder-picker-dialog/folder-picker-dialog-harbornavi.component.ts"
                 }
               ]
             }

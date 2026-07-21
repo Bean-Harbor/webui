@@ -12,6 +12,7 @@ import { Store } from '@ngrx/store';
 import { TranslateModule } from '@ngx-translate/core';
 import { TnIconComponent } from '@truenas/ui-components';
 import { map } from 'rxjs/operators';
+import { WINDOW } from 'app/helpers/window.helper';
 import { LayoutService } from 'app/modules/layout/layout.service';
 import { PageTitleService } from 'app/modules/layout/page-title.service';
 import { FakeProgressBarComponent } from 'app/modules/loader/components/fake-progress-bar/fake-progress-bar.component';
@@ -40,6 +41,7 @@ export class PageHeaderComponent implements OnInit, OnDestroy {
   private router = inject(Router);
   private store = inject(Store);
   private navService = inject(NavigationService);
+  private window = inject<Window>(WINDOW);
 
   readonly pageTitle = input<string>();
   readonly customBadgeTitle = input<string>();
@@ -74,7 +76,7 @@ export class PageHeaderComponent implements OnInit, OnDestroy {
   }
 
   goBack(): void {
-    history.back();
+    this.window.history.back();
   }
 
   minimize(): void {
