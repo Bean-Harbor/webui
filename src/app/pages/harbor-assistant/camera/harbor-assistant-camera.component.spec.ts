@@ -8,6 +8,7 @@ import { PageHeaderComponent } from 'app/modules/page-header/page-title-header/p
 import { HarborAssistantCameraComponent } from 'app/pages/harbor-assistant/camera/harbor-assistant-camera.component';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
   HarborAssistantSearchDvrStatusResponse,
   HarborAssistantSearchDvrTimelineResponse,
@@ -47,6 +48,7 @@ describe('Harbor Assistant camera component', () => {
       renewCameraLiveSession: jest.fn(() => of(liveSession())),
       stopCameraLiveSession: jest.fn(() => of(liveSession({ status: 'stopped', playlist_url: null, playlist_ready: false }))),
       cameraLiveStatus: jest.fn(() => of(liveSession())),
+      harborLinkCapabilities: jest.fn(() => of(harborLinkCapabilities())),
       createSnapshotTask: jest.fn(() => snapshotSubject.asObservable()),
       startDvrRecording: jest.fn(() => of(dvrStatus('recording'))),
       stopDvrRecording: jest.fn(() => of(dvrStatus('stopped'))),
@@ -256,6 +258,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const transitionCanvas = fakeTransitionCanvas();
     const componentState = spectator.component as unknown as {
+      harborLinkCapabilities: { set: (value: HarborAssistantHarborLinkCapabilitiesResponse) => void };
       liveControlPlaybackMode: { set: (value: 'hls-timeshift') => void };
       liveTransitionFrame?: { nativeElement: HTMLCanvasElement };
       liveTransitionFrameVisible: () => boolean;
@@ -263,6 +266,7 @@ describe('Harbor Assistant camera component', () => {
       scheduleWebRtcPlaybackAttach: jest.Mock;
       startWebRtcPlaybackFromSession: (session: HarborAssistantCameraLiveSessionResponse) => boolean;
     };
+    componentState.harborLinkCapabilities.set(harborLinkCapabilities());
     componentState.liveControlPlaybackMode.set('hls-timeshift');
     componentState.liveTransitionFrame = { nativeElement: transitionCanvas.canvas };
     componentState.liveVideo = { nativeElement: video };
@@ -286,6 +290,123 @@ describe('Harbor Assistant camera component', () => {
     }
     discardPeriodicTasks();
   }));
+
+  it('does not start WHEP when HarborLink marks WebRTC as degraded', fakeAsync(() => {
+    const originalPeerConnection = globalThis.RTCPeerConnection;
+    Object.defineProperty(globalThis, 'RTCPeerConnection', {
+      configurable: true,
+      value: jest.fn(),
+      writable: true,
+    });
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      harborLinkCapabilities: { set: (value: HarborAssistantHarborLinkCapabilitiesResponse) => void };
+      scheduleWebRtcPlaybackAttach: jest.Mock;
+      startWebRtcPlaybackFromSession: (session: HarborAssistantCameraLiveSessionResponse) => boolean;
+    };
+    componentState.harborLinkCapabilities.set(harborLinkCapabilities('degraded'));
+    componentState.scheduleWebRtcPlaybackAttach = jest.fn();
+
+    try {
+      expect(componentState.startWebRtcPlaybackFromSession(liveSession({
+        webrtc_status: 'ready',
+        webrtc_url: '/api/harbor-link/media/harbor-live-test/whep',
+      }))).toBe(false);
+      expect(componentState.scheduleWebRtcPlaybackAttach).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(globalThis, 'RTCPeerConnection', {
+        configurable: true,
+        value: originalPeerConnection,
+        writable: true,
+      });
+    }
+    discardPeriodicTasks();
+  }));
+
+  it('deletes a remote WHEP resource when attach is cancelled after POST', async () => {
+    const originalPeerConnection = globalThis.RTCPeerConnection;
+    const originalFetch = globalThis.fetch;
+    const peerConnection = {
+      addEventListener: jest.fn(),
+      addTransceiver: jest.fn(),
+      close: jest.fn(),
+      connectionState: 'connected',
+      createOffer: jest.fn(() => Promise.resolve({ type: 'offer', sdp: 'offer-sdp' })),
+      iceGatheringState: 'complete',
+      localDescription: null as RTCSessionDescriptionInit | null,
+      onconnectionstatechange: null as (() => void) | null,
+      ontrack: null as ((event: RTCTrackEvent) => void) | null,
+      removeEventListener: jest.fn(),
+      setLocalDescription: jest.fn((description: RTCSessionDescriptionInit) => {
+        peerConnection.localDescription = description;
+        return Promise.resolve();
+      }),
+      setRemoteDescription: jest.fn(() => Promise.resolve()),
+    };
+    const fetchMock = jest.fn((url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        return Promise.resolve({ ok: true });
+      }
+      return Promise.resolve({
+        headers: {
+          get: (name: string) => {
+            return name === 'Location' ? '/api/harbor-link/media/harbor-live-test/whep/session-1' : null;
+          },
+        },
+        ok: true,
+        status: 201,
+        text: () => {
+          componentState.webrtcAttachToken += 1;
+          return Promise.resolve('answer-sdp');
+        },
+      });
+    });
+    Object.defineProperty(globalThis, 'RTCPeerConnection', {
+      configurable: true,
+      value: jest.fn(() => peerConnection),
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      value: fetchMock,
+      writable: true,
+    });
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      attachWhepPlayback: (video: HTMLVideoElement, url: string, token: number) => Promise<void>;
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      webrtcAttachToken: number;
+    };
+    const video = fakeLiveVideo();
+    componentState.liveVideo = { nativeElement: video };
+    componentState.webrtcAttachToken = 1;
+
+    try {
+      await componentState.attachWhepPlayback(
+        video,
+        '/api/harbor-link/media/harbor-live-test/whep',
+        1,
+      );
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://localhost/api/harbor-link/media/harbor-live-test/whep/session-1',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+      expect(peerConnection.close).toHaveBeenCalled();
+      expect(peerConnection.setRemoteDescription).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(globalThis, 'RTCPeerConnection', {
+        configurable: true,
+        value: originalPeerConnection,
+        writable: true,
+      });
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        value: originalFetch,
+        writable: true,
+      });
+    }
+  });
 
   it('keeps the frozen frame until the target transport presents its first frame', fakeAsync(() => {
     spectator = createComponent();
@@ -2391,6 +2512,26 @@ function liveSession(options: Partial<HarborAssistantCameraLiveSessionResponse> 
     updated_at: '1714600001',
     message: 'H.264 live remux is running',
     ...options,
+  };
+}
+
+function harborLinkCapabilities(
+  webrtcStatus: 'ready' | 'degraded' | 'not_configured' = 'ready',
+): HarborAssistantHarborLinkCapabilitiesResponse {
+  return {
+    ok: true,
+    status: webrtcStatus === 'ready' ? 'ready' : 'degraded',
+    contract: {
+      version: '1.0',
+      major: '1',
+    },
+    features: {
+      camera: { status: 'ready' },
+      homeAssistant: { status: 'ready' },
+      recording: { status: 'ready' },
+      hls: { status: 'ready', basePath: '/api/harbor-link/hls' },
+      webrtc: { status: webrtcStatus, basePath: '/api/harbor-link/media' },
+    },
   };
 }
 

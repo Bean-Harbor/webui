@@ -134,6 +134,31 @@ export interface HarborAssistantCameraLiveSessionResponse {
   } | null;
 }
 
+export interface HarborAssistantHarborLinkFeatureStatus {
+  status?: string | null;
+  basePath?: string | null;
+  message?: string | null;
+}
+
+export interface HarborAssistantHarborLinkCapabilitiesResponse {
+  ok?: boolean;
+  status?: string | null;
+  contractVersion?: string | null;
+  contract?: {
+    version?: string | null;
+    major?: string | null;
+  } | null;
+  dependency?: string | null;
+  error?: string | null;
+  features?: {
+    camera?: HarborAssistantHarborLinkFeatureStatus | null;
+    homeAssistant?: HarborAssistantHarborLinkFeatureStatus | null;
+    recording?: HarborAssistantHarborLinkFeatureStatus | null;
+    hls?: HarborAssistantHarborLinkFeatureStatus | null;
+    webrtc?: HarborAssistantHarborLinkFeatureStatus | null;
+  } | null;
+}
+
 export interface HarborAssistantSearchDvrTimelineSegment {
   device_id: string;
   file_path: string;

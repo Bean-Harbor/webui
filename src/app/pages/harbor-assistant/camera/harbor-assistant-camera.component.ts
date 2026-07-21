@@ -10,10 +10,11 @@ import { MatProgressBar } from '@angular/material/progress-bar';
 import { MatTab, MatTabGroup } from '@angular/material/tabs';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
 import { forkJoin, fromEvent, Observable, of, timer } from 'rxjs';
-import { catchError, finalize, shareReplay, tap } from 'rxjs/operators';
+import { catchError, finalize, shareReplay, switchMap, tap } from 'rxjs/operators';
 import Hls from 'hls.js';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
   HarborAssistantSearchResultFilter,
   HarborAssistantSearchCameraDevice,
@@ -172,6 +173,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   protected readonly hlsLiveUrl = signal<string | null>(null);
   protected readonly webrtcLiveUrl = signal<string | null>(null);
   protected readonly hlsLiveSession = signal<HarborAssistantCameraLiveSessionResponse | null>(null);
+  protected readonly harborLinkCapabilities = signal<HarborAssistantHarborLinkCapabilitiesResponse | null>(null);
   protected readonly hlsLiveStatus = signal<'stopped' | 'starting' | 'live' | 'degraded'>('stopped');
   protected readonly hlsLiveError = signal<string | null>(null);
   protected readonly liveControlCurrentTime = signal(0);
@@ -208,6 +210,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private webrtcPlaybackPending = false;
   private webrtcPeerConnection: RTCPeerConnection | null = null;
   private webrtcResourceUrl: string | null = null;
+  private webrtcDegradedSessionId: string | null = null;
   private webrtcPauseTimelineSeconds: number | null = null;
   private liveTimelineStartedAtEpochSeconds: number | null = null;
   private pendingHlsBehindLiveSeconds: number | null = null;
@@ -670,6 +673,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsLiveUrl.set(null);
     this.clearLiveSessionRenewTimer();
     this.stopWebRtcPlayback();
+    this.webrtcDegradedSessionId = null;
     const streamProfile = this.selectedStreamProfile();
     const warmSession = this.hlsWarmSession
       && this.hlsWarmSessionMatches(this.hlsWarmSession, deviceId, streamProfile)
@@ -694,7 +698,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         this.liveSessionTtlSeconds,
       ).pipe(catchError(() => this.api.startCameraLiveSession(deviceId, streamProfile)))
       : warmStartRequest ?? this.api.startCameraLiveSession(deviceId, streamProfile);
-    startRequest.pipe(
+    this.refreshHarborLinkCapabilitiesForLive().pipe(
+      switchMap(() => startRequest),
       takeUntilDestroyed(this.destroyRef),
       finalize(() => {
         if (this.actionBusy() === 'live') {
@@ -2219,7 +2224,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private startWebRtcPlaybackFromSession(session: HarborAssistantCameraLiveSessionResponse): boolean {
     if (
-      session.webrtc_status !== 'ready'
+      !this.harborLinkWebRtcReady()
+      || session.session_id === this.webrtcDegradedSessionId
+      || session.webrtc_status !== 'ready'
       || !session.webrtc_url
       || typeof RTCPeerConnection === 'undefined'
     ) {
@@ -2332,11 +2339,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     const answer = await response.text();
     const location = response.headers.get('Location');
-    this.webrtcResourceUrl = location ? new URL(location, window.location.href).toString() : null;
+    const negotiatedResourceUrl = location ? new URL(location, window.location.href).toString() : null;
     if (this.webrtcAttachToken !== token) {
       peerConnection.close();
+      this.deleteWhepResource(negotiatedResourceUrl);
       return;
     }
+    this.webrtcResourceUrl = negotiatedResourceUrl;
     await peerConnection.setRemoteDescription({ type: 'answer', sdp: answer });
   }
 
@@ -2368,6 +2377,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private fallbackToHlsPlayback(message: string): void {
     const session = this.hlsLiveSession();
+    if (session?.session_id) {
+      this.webrtcDegradedSessionId = session.session_id;
+    }
     if (this.isWebRtcPlaybackActive()) {
       this.beginLiveTransportTransition('hls');
     }
@@ -2393,9 +2405,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     const resourceUrl = this.webrtcResourceUrl;
     this.webrtcResourceUrl = null;
-    if (resourceUrl && typeof fetch !== 'undefined') {
-      fetch(resourceUrl, { method: 'DELETE', keepalive: true }).catch((): void => undefined);
-    }
+    this.deleteWhepResource(resourceUrl);
     const video = this.liveVideo?.nativeElement;
     if (video?.srcObject) {
       this.pauseLiveVideoSilently(video);
@@ -2403,6 +2413,27 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     if (clearUrl) {
       this.webrtcLiveUrl.set(null);
+    }
+  }
+
+  private refreshHarborLinkCapabilitiesForLive(): Observable<HarborAssistantHarborLinkCapabilitiesResponse | null> {
+    return this.api.harborLinkCapabilities().pipe(
+      tap((capabilities) => this.harborLinkCapabilities.set(capabilities)),
+      catchError(() => {
+        this.harborLinkCapabilities.set(null);
+        return of(null);
+      }),
+    );
+  }
+
+  private harborLinkWebRtcReady(): boolean {
+    const capabilities = this.harborLinkCapabilities();
+    return Boolean(capabilities?.ok !== false && capabilities?.features?.webrtc?.status === 'ready');
+  }
+
+  private deleteWhepResource(resourceUrl: string | null): void {
+    if (resourceUrl && typeof fetch !== 'undefined') {
+      fetch(resourceUrl, { method: 'DELETE', keepalive: true }).catch((): void => undefined);
     }
   }
 

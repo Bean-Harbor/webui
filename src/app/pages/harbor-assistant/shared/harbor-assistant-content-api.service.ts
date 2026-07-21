@@ -5,6 +5,7 @@ import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services
 import { harborAssistantPreviewUrl } from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
   HarborAssistantSearchDvrStatusResponse,
   HarborAssistantSearchDvrTimelineResponse,
@@ -124,6 +125,12 @@ export class HarborAssistantContentApiService {
       this.apiUrl(
         `/cameras/${encodeURIComponent(deviceId)}/live/status${query}`,
       ),
+    );
+  }
+
+  harborLinkCapabilities(): Observable<HarborAssistantHarborLinkCapabilitiesResponse> {
+    return this.http.get<HarborAssistantHarborLinkCapabilitiesResponse>(
+      this.apiUrl('/harbor-link/capabilities'),
     );
   }
 
