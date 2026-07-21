@@ -207,6 +207,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsWarmStartRequest: HarborAssistantHlsWarmStartRequest | null = null;
   private hlsRecoveryAttempts = 0;
   private webrtcAttachToken = 0;
+  private webrtcMediaStream: MediaStream | null = null;
+  private webrtcPlayRequestPending = false;
+  private webrtcPlayRetryTimer: number | null = null;
   private webrtcPlaybackPending = false;
   private webrtcPeerConnection: RTCPeerConnection | null = null;
   private webrtcResourceUrl: string | null = null;
@@ -253,6 +256,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly hlsPlaylistMaxWaitMs = 90_000;
   private readonly liveSessionRenewIntervalMs = 120_000;
   private readonly liveSessionTtlSeconds = 300;
+  private readonly webRtcPlayAbortRetryLimit = 2;
+  private readonly webRtcPlayRetryDelayMs = 100;
   private readonly liveTransitionFallbackRevealDelayMs = 250;
   private readonly liveTransitionPaintDelayMs = 32;
 
@@ -1131,7 +1136,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (this.isWebRtcPlaybackActive()) {
       const video = this.liveVideo?.nativeElement;
       if (video?.paused) {
-        void video.play().catch(() => this.fallbackToHlsPlayback('WebRTC playback was interrupted.'));
+        this.requestWebRtcPlayback(video, this.webrtcAttachToken);
       }
       return;
     }
@@ -1146,6 +1151,18 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   onLiveVideoPlaying(): void {
+    const video = this.liveVideo?.nativeElement;
+    if (
+      video?.srcObject
+      && video.srcObject === this.webrtcMediaStream
+      && this.webrtcPeerConnection
+    ) {
+      this.liveControlPlaybackMode.set('webrtc');
+      this.webrtcPlaybackPending = false;
+      this.webrtcPauseTimelineSeconds = null;
+      this.resetLivePlaybackUserPause();
+      this.startLiveEdgeMonitor();
+    }
     this.livePlaybackHasPlayed = true;
     this.livePlaybackBackgroundPaused = false;
     this.startLiveControlTimeline();
@@ -1203,7 +1220,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (this.liveControlPlaybackMode() === 'webrtc') {
       if (!this.liveDocumentIsHidden() && video?.paused) {
         this.livePlaybackBackgroundPaused = false;
-        void video.play().catch(() => this.fallbackToHlsPlayback('WebRTC playback did not resume.'));
+        this.requestWebRtcPlayback(video, this.webrtcAttachToken);
       }
       return;
     }
@@ -2280,6 +2297,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private async attachWhepPlayback(video: HTMLVideoElement, url: string, token: number): Promise<void> {
     const peerConnection = new RTCPeerConnection({ iceServers: [] });
     this.webrtcPeerConnection?.close();
+    this.clearWebRtcPlayRetry();
+    this.webrtcMediaStream = null;
+    this.webrtcPlayRequestPending = false;
     this.webrtcPeerConnection = peerConnection;
     peerConnection.addTransceiver('video', { direction: 'recvonly' });
     peerConnection.addTransceiver('audio', { direction: 'recvonly' });
@@ -2287,21 +2307,14 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       if (this.webrtcAttachToken !== token || this.webrtcPeerConnection !== peerConnection) {
         return;
       }
-      const stream = event.streams[0] ?? new MediaStream([event.track]);
-      if (video.srcObject !== stream) {
-        this.stopHlsPlayback();
-        video.srcObject = stream;
-      }
+      this.attachWebRtcTrack(video, event);
       video.autoplay = true;
       video.playsInline = true;
       video.muted = this.liveControlMuted();
       video.volume = this.liveControlVolume();
-      this.liveControlPlaybackMode.set('webrtc');
-      this.webrtcPlaybackPending = false;
       this.webrtcPauseTimelineSeconds = null;
       this.resetLivePlaybackUserPause();
-      this.startLiveEdgeMonitor();
-      video.play().catch(() => this.fallbackToHlsPlayback('WebRTC playback was blocked.'));
+      this.requestWebRtcPlayback(video, token);
     };
     peerConnection.onconnectionstatechange = () => {
       if (this.webrtcAttachToken !== token || this.webrtcPeerConnection !== peerConnection) {
@@ -2347,6 +2360,63 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     this.webrtcResourceUrl = negotiatedResourceUrl;
     await peerConnection.setRemoteDescription({ type: 'answer', sdp: answer });
+  }
+
+  private attachWebRtcTrack(video: HTMLVideoElement, event: RTCTrackEvent): void {
+    const stream = this.webrtcMediaStream ?? event.streams[0] ?? new MediaStream();
+    this.webrtcMediaStream = stream;
+    if (!stream.getTracks().includes(event.track)) {
+      stream.addTrack(event.track);
+    }
+    if (video.srcObject !== stream) {
+      this.stopHlsPlayback();
+      video.srcObject = stream;
+    }
+  }
+
+  private requestWebRtcPlayback(
+    video: HTMLVideoElement,
+    token: number,
+    abortRetryCount = 0,
+  ): void {
+    if (
+      this.webrtcAttachToken !== token
+      || video.srcObject !== this.webrtcMediaStream
+      || this.webrtcPlayRequestPending
+      || this.webrtcPlayRetryTimer !== null
+    ) {
+      return;
+    }
+    this.webrtcPlayRequestPending = true;
+    video.play().then(() => {
+      if (this.webrtcAttachToken === token) {
+        this.webrtcPlayRequestPending = false;
+      }
+    }).catch((error: unknown) => {
+      if (this.webrtcAttachToken !== token) {
+        return;
+      }
+      this.webrtcPlayRequestPending = false;
+      if (this.webRtcPlaybackWasAborted(error) && abortRetryCount < this.webRtcPlayAbortRetryLimit) {
+        this.webrtcPlayRetryTimer = globalThis.setTimeout(() => {
+          this.webrtcPlayRetryTimer = null;
+          this.requestWebRtcPlayback(video, token, abortRetryCount + 1);
+        }, this.webRtcPlayRetryDelayMs);
+        return;
+      }
+      this.fallbackToHlsPlayback(this.webRtcPlaybackFailureMessage(error));
+    });
+  }
+
+  private webRtcPlaybackWasAborted(error: unknown): boolean {
+    return Boolean(error && typeof error === 'object' && 'name' in error && error.name === 'AbortError');
+  }
+
+  private webRtcPlaybackFailureMessage(error: unknown): string {
+    if (error && typeof error === 'object' && 'name' in error && typeof error.name === 'string') {
+      return `WebRTC playback failed (${error.name}).`;
+    }
+    return 'WebRTC playback failed.';
   }
 
   private waitForIceGathering(peerConnection: RTCPeerConnection): Promise<void> {
@@ -2395,6 +2465,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private stopWebRtcPlayback(clearUrl = true): void {
     this.webrtcAttachToken += 1;
+    this.clearWebRtcPlayRetry();
+    this.webrtcMediaStream = null;
+    this.webrtcPlayRequestPending = false;
     this.webrtcPlaybackPending = false;
     const peerConnection = this.webrtcPeerConnection;
     this.webrtcPeerConnection = null;
@@ -2435,6 +2508,14 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (resourceUrl && typeof fetch !== 'undefined') {
       fetch(resourceUrl, { method: 'DELETE', keepalive: true }).catch((): void => undefined);
     }
+  }
+
+  private clearWebRtcPlayRetry(): void {
+    if (this.webrtcPlayRetryTimer === null) {
+      return;
+    }
+    globalThis.clearTimeout(this.webrtcPlayRetryTimer);
+    this.webrtcPlayRetryTimer = null;
   }
 
   private switchToHlsTimeshift(timelineSeconds: number, autoplay: boolean): void {

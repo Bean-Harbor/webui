@@ -130,7 +130,11 @@ describe('Harbor Assistant camera component', () => {
   it('negotiates WHEP and attaches the low-latency WebRTC stream', async () => {
     const originalPeerConnection = globalThis.RTCPeerConnection;
     const originalFetch = globalThis.fetch;
-    const mediaStream = {} as MediaStream;
+    const videoTrack = { id: 'video-track' } as MediaStreamTrack;
+    const mediaStream = {
+      addTrack: jest.fn(),
+      getTracks: jest.fn(() => [videoTrack]),
+    } as unknown as MediaStream;
     const peerConnection = {
       addEventListener: jest.fn(),
       addTransceiver: jest.fn(),
@@ -191,11 +195,15 @@ describe('Harbor Assistant camera component', () => {
         body: 'offer-sdp',
         method: 'POST',
       }));
-      peerConnection.ontrack?.({ streams: [mediaStream] } as RTCTrackEvent);
+      peerConnection.ontrack?.({ streams: [mediaStream], track: videoTrack } as RTCTrackEvent);
 
       expect(video.srcObject).toBe(mediaStream);
-      expect(componentState.liveControlPlaybackMode()).toBe('webrtc');
       expect(video.play).toHaveBeenCalled();
+      expect(componentState.liveControlPlaybackMode()).toBe('hls-fallback');
+
+      spectator.component.onLiveVideoPlaying();
+
+      expect(componentState.liveControlPlaybackMode()).toBe('webrtc');
     } finally {
       Object.defineProperty(globalThis, 'RTCPeerConnection', {
         configurable: true,
@@ -209,6 +217,66 @@ describe('Harbor Assistant camera component', () => {
       });
     }
   });
+
+  it('keeps one MediaStream when WebRTC audio and video tracks arrive separately', () => {
+    spectator = createComponent();
+    const videoTrack = { id: 'video-track' } as MediaStreamTrack;
+    const audioTrack = { id: 'audio-track' } as MediaStreamTrack;
+    const attachedTracks = [videoTrack];
+    const primaryStream = {
+      addTrack: jest.fn((track: MediaStreamTrack) => attachedTracks.push(track)),
+      getTracks: jest.fn(() => attachedTracks),
+    } as unknown as MediaStream;
+    const secondaryStream = {
+      addTrack: jest.fn(),
+      getTracks: jest.fn(() => [audioTrack]),
+    } as unknown as MediaStream;
+    const video = fakeLiveVideo({ srcObject: null });
+    const componentState = spectator.component as unknown as {
+      attachWebRtcTrack: (target: HTMLVideoElement, event: RTCTrackEvent) => void;
+    };
+
+    componentState.attachWebRtcTrack(video, {
+      streams: [primaryStream],
+      track: videoTrack,
+    } as RTCTrackEvent);
+    componentState.attachWebRtcTrack(video, {
+      streams: [secondaryStream],
+      track: audioTrack,
+    } as RTCTrackEvent);
+
+    expect(video.srcObject).toBe(primaryStream);
+    expect(primaryStream.addTrack).toHaveBeenCalledWith(audioTrack);
+    expect(secondaryStream.addTrack).not.toHaveBeenCalled();
+  });
+
+  it('retries an aborted WebRTC play request without falling back to HLS', fakeAsync(() => {
+    spectator = createComponent();
+    const stream = {
+      addTrack: jest.fn(),
+      getTracks: jest.fn(() => []),
+    } as unknown as MediaStream;
+    const play = jest.fn()
+      .mockRejectedValueOnce({ name: 'AbortError' })
+      .mockResolvedValue(undefined);
+    const video = fakeLiveVideo({ play, srcObject: stream });
+    const componentState = spectator.component as unknown as {
+      hlsLiveError: () => string | null;
+      requestWebRtcPlayback: (target: HTMLVideoElement, token: number) => void;
+      webrtcAttachToken: number;
+      webrtcMediaStream: MediaStream | null;
+    };
+    componentState.webrtcAttachToken = 1;
+    componentState.webrtcMediaStream = stream;
+
+    componentState.requestWebRtcPlayback(video, componentState.webrtcAttachToken);
+    flushMicrotasks();
+    tick(100);
+    flushMicrotasks();
+
+    expect(play).toHaveBeenCalledTimes(2);
+    expect(componentState.hlsLiveError()).toBeNull();
+  }));
 
   it('freezes the current WebRTC frame before attaching HLS time-shift playback', fakeAsync(() => {
     spectator = createComponent();
