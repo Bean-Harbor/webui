@@ -1,7 +1,4 @@
 import {
-  HarborAssistantSearchResponse,
-} from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
-import {
   buildHarborAssistantSearchPayload,
   buildHarborAssistantSearchWaterfallItems,
   harborAssistantSearchErrorMessage,
@@ -9,6 +6,9 @@ import {
   harborAssistantPreviewUrl,
   harborAssistantSearchSameOriginAdminUrl,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
+import {
+  HarborAssistantSearchResponse,
+} from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
 
 describe('Harbor Assistant search result helpers', () => {
   it('builds modality-aware search payloads', () => {
@@ -101,13 +101,19 @@ describe('Harbor Assistant search result helpers', () => {
   it('classifies and sorts waterfall items across image, text, and video hits', () => {
     const response = searchResponse({
       images: [
-        { modality: 'image', path: '/mnt/photo-a.jpg', title: 'Photo A', score: 42 },
+        {
+          modality: 'image', path: '/mnt/photo-a.jpg', title: 'Photo A', score: 42,
+        },
       ],
       documents: [
-        { modality: 'document', path: '/mnt/note.md', title: 'Note', score: 77 },
+        {
+          modality: 'document', path: '/mnt/note.md', title: 'Note', score: 77,
+        },
       ],
       videos: [
-        { modality: 'video', path: '/mnt/clip.mp4', title: 'Clip', score: 55 },
+        {
+          modality: 'video', path: '/mnt/clip.mp4', title: 'Clip', score: 55,
+        },
       ],
     });
 

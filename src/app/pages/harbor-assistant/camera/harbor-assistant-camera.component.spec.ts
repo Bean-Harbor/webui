@@ -1,11 +1,12 @@
 import { fakeAsync, tick, discardPeriodicTasks, flushMicrotasks } from '@angular/core/testing';
 import { MatTabGroup } from '@angular/material/tabs';
 import { createComponentFactory, Spectator } from '@ngneat/spectator/jest';
+import Hls from 'hls.js';
 import { MockComponent } from 'ng-mocks';
 import { of, Subject, throwError } from 'rxjs';
-import Hls from 'hls.js';
 import { PageHeaderComponent } from 'app/modules/page-header/page-title-header/page-header.component';
 import { HarborAssistantCameraComponent } from 'app/pages/harbor-assistant/camera/harbor-assistant-camera.component';
+import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
 import {
   HarborAssistantCameraLiveSessionResponse,
   HarborAssistantHarborLinkCapabilitiesResponse,
@@ -15,11 +16,12 @@ import {
   HarborAssistantSearchResponse,
   HarborAssistantSearchSnapshotTaskResponse,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
-import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
+
+type HlsLiveStatus = 'stopped' | 'starting' | 'live' | 'degraded';
 
 describe('Harbor Assistant camera component', () => {
   let spectator: Spectator<HarborAssistantCameraComponent>;
-  let snapshotSubject: Subject<HarborAssistantSearchSnapshotTaskResponse>;
+  let snapshotSubject$: Subject<HarborAssistantSearchSnapshotTaskResponse>;
   let scrollIntoViewSpy: jest.Mock;
   let api: Partial<Record<keyof HarborAssistantContentApiService, jest.Mock>>;
 
@@ -37,7 +39,7 @@ describe('Harbor Assistant camera component', () => {
   });
 
   beforeEach(() => {
-    snapshotSubject = new Subject<HarborAssistantSearchSnapshotTaskResponse>();
+    snapshotSubject$ = new Subject<HarborAssistantSearchSnapshotTaskResponse>();
     scrollIntoViewSpy = jest.fn();
     (Element.prototype as unknown as { scrollIntoView: jest.Mock }).scrollIntoView = scrollIntoViewSpy;
     api = {
@@ -49,7 +51,7 @@ describe('Harbor Assistant camera component', () => {
       stopCameraLiveSession: jest.fn(() => of(liveSession({ status: 'stopped', playlist_url: null, playlist_ready: false }))),
       cameraLiveStatus: jest.fn(() => of(liveSession())),
       harborLinkCapabilities: jest.fn(() => of(harborLinkCapabilities())),
-      createSnapshotTask: jest.fn(() => snapshotSubject.asObservable()),
+      createSnapshotTask: jest.fn(() => snapshotSubject$.asObservable()),
       startDvrRecording: jest.fn(() => of(dvrStatus('recording'))),
       stopDvrRecording: jest.fn(() => of(dvrStatus('stopped'))),
       search: jest.fn(() => of(searchResponse())),
@@ -68,7 +70,7 @@ describe('Harbor Assistant camera component', () => {
     })));
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
     };
     componentState.hlsLiveStatus.set('starting');
 
@@ -101,7 +103,7 @@ describe('Harbor Assistant camera component', () => {
   it('returns the live panel to black after live playback stops', fakeAsync(() => {
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
     };
     componentState.hlsLiveStatus.set('starting');
 
@@ -411,6 +413,11 @@ describe('Harbor Assistant camera component', () => {
       }),
       setRemoteDescription: jest.fn(() => Promise.resolve()),
     };
+    let componentState: {
+      attachWhepPlayback: (video: HTMLVideoElement, url: string, token: number) => Promise<void>;
+      liveVideo?: { nativeElement: HTMLVideoElement };
+      webrtcAttachToken: number;
+    };
     const fetchMock = jest.fn((url: string, init?: RequestInit) => {
       if (init?.method === 'DELETE') {
         return Promise.resolve({ ok: true });
@@ -440,11 +447,7 @@ describe('Harbor Assistant camera component', () => {
       writable: true,
     });
     spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      attachWhepPlayback: (video: HTMLVideoElement, url: string, token: number) => Promise<void>;
-      liveVideo?: { nativeElement: HTMLVideoElement };
-      webrtcAttachToken: number;
-    };
+    componentState = spectator.component as unknown as typeof componentState;
     const video = fakeLiveVideo();
     componentState.liveVideo = { nativeElement: video };
     componentState.webrtcAttachToken = 1;
@@ -567,7 +570,7 @@ describe('Harbor Assistant camera component', () => {
     const video = fakeLiveVideo({ paused: false });
     const componentState = spectator.component as unknown as {
       hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveControlCurrentTime: () => number;
       liveControlEndTime: () => number;
       liveControlPlaybackMode: { set: (value: 'webrtc') => void };
@@ -702,22 +705,22 @@ describe('Harbor Assistant camera component', () => {
   }));
 
   it('starts HLS prewarm before the DVR status request completes', fakeAsync(() => {
-    const pendingDvrStatus = new Subject<HarborAssistantSearchDvrStatusResponse>();
-    api.dvrStatus = jest.fn(() => pendingDvrStatus.asObservable());
+    const pendingDvrStatus$ = new Subject<HarborAssistantSearchDvrStatusResponse>();
+    api.dvrStatus = jest.fn(() => pendingDvrStatus$.asObservable());
     spectator = createComponent();
 
     tick(300);
 
     expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'sub');
 
-    pendingDvrStatus.next(dvrStatus());
-    pendingDvrStatus.complete();
+    pendingDvrStatus$.next(dvrStatus());
+    pendingDvrStatus$.complete();
     discardPeriodicTasks();
   }));
 
   it('reuses an in-flight HLS prewarm request when live playback starts', fakeAsync(() => {
-    const pendingStart = new Subject<HarborAssistantCameraLiveSessionResponse>();
-    api.startCameraLiveSession = jest.fn(() => pendingStart.asObservable());
+    const pendingStart$ = new Subject<HarborAssistantCameraLiveSessionResponse>();
+    api.startCameraLiveSession = jest.fn(() => pendingStart$.asObservable());
     spectator = createComponent();
 
     tick(300);
@@ -726,8 +729,8 @@ describe('Harbor Assistant camera component', () => {
     expect(api.startCameraLiveSession).toHaveBeenCalledTimes(1);
     expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'sub');
 
-    pendingStart.next(liveSession());
-    pendingStart.complete();
+    pendingStart$.next(liveSession());
+    pendingStart$.complete();
     tick();
 
     expect(api.stopCameraLiveSession).not.toHaveBeenCalled();
@@ -772,7 +775,7 @@ describe('Harbor Assistant camera component', () => {
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
       hlsLiveError: () => string | null;
-      hlsLiveStatus: () => 'stopped' | 'starting' | 'live' | 'degraded';
+      hlsLiveStatus: () => HlsLiveStatus;
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoLoadedData: () => void;
     };
@@ -794,7 +797,7 @@ describe('Harbor Assistant camera component', () => {
   }));
 
   it('attaches HLS playback while a playlist with pending segments is still starting', fakeAsync(() => {
-    const pendingStatus = new Subject<HarborAssistantCameraLiveSessionResponse>();
+    const pendingStatus$ = new Subject<HarborAssistantCameraLiveSessionResponse>();
     const playlistUrl = '/api/beacon/cameras/cam-1/live/live-test/index.m3u8';
     api.startCameraLiveSession = jest.fn(() => of(liveSession({
       playlist_url: playlistUrl,
@@ -808,7 +811,7 @@ describe('Harbor Assistant camera component', () => {
         ffmpeg_running: true,
       },
     })));
-    api.cameraLiveStatus = jest.fn(() => pendingStatus.asObservable());
+    api.cameraLiveStatus = jest.fn(() => pendingStatus$.asObservable());
     spectator = createComponent();
     const loadSource = jest.spyOn(Hls.prototype, 'loadSource').mockImplementation(jest.fn());
     const attachMedia = jest.spyOn(Hls.prototype, 'attachMedia').mockImplementation(jest.fn());
@@ -817,7 +820,7 @@ describe('Harbor Assistant camera component', () => {
     jest.spyOn(Hls.prototype, 'destroy').mockImplementation(jest.fn());
     const video = fakeLiveVideo();
     const componentState = spectator.component as unknown as {
-      hlsLiveStatus: () => 'stopped' | 'starting' | 'live' | 'degraded';
+      hlsLiveStatus: () => HlsLiveStatus;
       liveVideo?: { nativeElement: HTMLVideoElement };
     };
     componentState.liveVideo = { nativeElement: video };
@@ -837,7 +840,7 @@ describe('Harbor Assistant camera component', () => {
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
       hlsLiveStatus: {
-        set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void;
+        set: (value: HlsLiveStatus) => void;
       } & (() => string);
       hlsLiveError: () => string | null;
       liveVideo?: { nativeElement: HTMLVideoElement };
@@ -879,7 +882,7 @@ describe('Harbor Assistant camera component', () => {
     const video = fakeLiveVideo({ play });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoPause: () => void;
     };
@@ -905,7 +908,7 @@ describe('Harbor Assistant camera component', () => {
     const video = fakeLiveVideo({ pause, paused: true, play });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoLoadedData: () => void;
       resumeLivePlayback: () => void;
@@ -943,7 +946,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoPause: () => void;
       onLiveVideoPlaying: () => void;
@@ -981,7 +984,7 @@ describe('Harbor Assistant camera component', () => {
     const video = fakeLiveVideo({ currentTime: 12, paused: true, play });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoPause: () => void;
       onLiveVideoPlaying: () => void;
@@ -1010,7 +1013,7 @@ describe('Harbor Assistant camera component', () => {
     const video = fakeLiveVideo({ currentTime: 12, paused: true, play });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       playbackVideo?: { nativeElement: HTMLVideoElement };
       onCameraTabChange: (index: number) => void;
@@ -1052,7 +1055,7 @@ describe('Harbor Assistant camera component', () => {
     const video = fakeLiveVideo({ currentTime: 12, paused: true, play });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onCameraTabChange: (index: number) => void;
       onLiveVideoPause: () => void;
@@ -1084,7 +1087,7 @@ describe('Harbor Assistant camera component', () => {
     const componentState = spectator.component as unknown as {
       hlsLiveError: () => string | null;
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoPause: () => void;
       resumeLivePlayback: () => void;
@@ -1119,7 +1122,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoPause: () => void;
       onLiveVideoPlay: () => void;
@@ -1146,7 +1149,7 @@ describe('Harbor Assistant camera component', () => {
   it('keeps a stale programmatic play event from clearing user pause', fakeAsync(() => {
     spectator = createComponent();
     const play = jest.fn(() => new Promise<void>((resolve) => {
-      window.setTimeout(resolve, 1);
+      globalThis.setTimeout(resolve, 1);
     }));
     const pause = jest.fn();
     const video = fakeLiveVideo({
@@ -1157,7 +1160,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoPause: () => void;
       onLiveVideoPlay: () => void;
@@ -1184,7 +1187,7 @@ describe('Harbor Assistant camera component', () => {
   it('pauses a stale pending play request after user pause', fakeAsync(() => {
     spectator = createComponent();
     const play = jest.fn(() => new Promise<void>((resolve) => {
-      window.setTimeout(resolve, 1);
+      globalThis.setTimeout(resolve, 1);
     }));
     const pause = jest.fn();
     const video = fakeLiveVideo({
@@ -1195,7 +1198,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoPause: () => void;
       resumeLivePlayback: () => void;
@@ -1228,7 +1231,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
     };
     componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
@@ -1257,7 +1260,7 @@ describe('Harbor Assistant camera component', () => {
     const componentState = spectator.component as unknown as {
       hls: Hls | null;
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       seekLiveVideoToEdge: (force?: boolean) => void;
     };
@@ -1310,7 +1313,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoPause: () => void;
       onLiveVideoPlay: () => void;
@@ -1442,7 +1445,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoSeeked: () => void;
       seekLiveVideoToEdge: (force?: boolean) => void;
@@ -1472,7 +1475,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoRateChange: () => void;
       onLiveVideoSeeked: () => void;
@@ -1505,7 +1508,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoRateChange: () => void;
       onLiveVideoTimeUpdate: () => void;
@@ -1542,7 +1545,7 @@ describe('Harbor Assistant camera component', () => {
     const componentState = spectator.component as unknown as {
       hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveControlCurrentTime: { set: (value: number) => void };
       liveControlEndTime: { set: (value: number) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
@@ -1583,7 +1586,7 @@ describe('Harbor Assistant camera component', () => {
       hls: Hls | null;
       hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveControlCurrentTime: { set: (value: number) => void };
       liveControlEndTime: { set: (value: number) => void };
       liveControlPlaybackMode: { set: (value: 'hls-timeshift') => void } & (() => string);
@@ -1727,7 +1730,7 @@ describe('Harbor Assistant camera component', () => {
       hls: Hls | null;
       hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveControlCurrentTime: { set: (value: number) => void };
       liveControlEndTime: { set: (value: number) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
@@ -1774,7 +1777,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoSeeked: () => void;
       seekLiveVideoToEdge: (force?: boolean) => void;
@@ -1804,7 +1807,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoSeeked: () => void;
       seekLiveVideoToEdge: (force?: boolean) => void;
@@ -1848,7 +1851,7 @@ describe('Harbor Assistant camera component', () => {
         };
       };
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
     };
     const video = {
@@ -1902,7 +1905,7 @@ describe('Harbor Assistant camera component', () => {
     const componentState = spectator.component as unknown as {
       attachHlsPlayback: () => boolean;
       hlsLiveStatus: {
-        set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void;
+        set: (value: HlsLiveStatus) => void;
       } & (() => string);
       hlsLiveUrl: { set: (value: string | null) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
@@ -1944,7 +1947,7 @@ describe('Harbor Assistant camera component', () => {
     });
     const componentState = spectator.component as unknown as {
       attachHlsPlayback: () => boolean;
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       hlsLiveUrl: { set: (value: string | null) => void };
       liveControlPlaybackMode: { set: (value: 'webrtc' | 'hls-timeshift' | 'hls-fallback') => void };
       livePlaybackUserDelayed: boolean;
@@ -1996,7 +1999,7 @@ describe('Harbor Assistant camera component', () => {
     const componentState = spectator.component as unknown as {
       attachHlsPlayback: () => boolean;
       hlsLiveUrl: { set: (value: string | null) => void };
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
       onLiveVideoPause: () => void;
     };
@@ -2021,7 +2024,10 @@ describe('Harbor Assistant camera component', () => {
   it('recovers fatal hls.js media errors before degrading live playback', fakeAsync(() => {
     spectator = createComponent();
     const playlistUrl = '/api/beacon/cameras/cam-1/live/live-test/index.m3u8';
-    const hlsHandlers = new Map<string, (event: string, data: { details: string; fatal: boolean; type: string }) => void>();
+    const hlsHandlers = new Map<
+      string,
+      (event: string, data: { details: string; fatal: boolean; type: string }) => void
+    >();
     const recoverMediaError = jest.spyOn(Hls.prototype, 'recoverMediaError').mockImplementation(jest.fn());
     jest.spyOn(Hls, 'isSupported').mockReturnValue(true);
     jest.spyOn(Hls.prototype, 'loadSource').mockImplementation(jest.fn());
@@ -2037,7 +2043,7 @@ describe('Harbor Assistant camera component', () => {
       attachHlsPlayback: () => boolean;
       hlsLiveError: () => string | null;
       hlsLiveStatus: {
-        set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void;
+        set: (value: HlsLiveStatus) => void;
       } & (() => string);
       hlsLiveUrl: { set: (value: string | null) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
@@ -2089,7 +2095,7 @@ describe('Harbor Assistant camera component', () => {
       attachHlsPlayback: () => boolean;
       hlsLiveError: () => string | null;
       hlsLiveStatus: {
-        set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void;
+        set: (value: HlsLiveStatus) => void;
       } & (() => string);
       hlsLiveUrl: { set: (value: string | null) => void };
       liveVideo?: { nativeElement: HTMLVideoElement };
@@ -2134,7 +2140,7 @@ describe('Harbor Assistant camera component', () => {
   it('keeps the last good live frame when a snapshot refresh fails', fakeAsync(() => {
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: 'stopped' | 'starting' | 'live' | 'degraded') => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       lastGoodLiveFrameUrl: { set: (value: string) => void };
       liveSnapshotErrorToken: { set: (value: number) => void };
       liveSnapshotToken: () => number;
@@ -2180,7 +2186,7 @@ describe('Harbor Assistant camera component', () => {
 
     expect(api.createSnapshotTask).toHaveBeenCalledWith('cam-1');
     expect(spectator.query('.live-feedback')).toHaveText('Captured');
-    expect(spectator.queryAll('.recent-media-card.snapshot.pending').length).toBe(1);
+    expect(spectator.queryAll('.recent-media-card.snapshot.pending')).toHaveLength(1);
     expect(spectator.component.timelineItems()[0].file_path).toContain('ui://harbor-assistant-camera/snapshot:cam-1');
     tick(3000);
     discardPeriodicTasks();
@@ -2209,7 +2215,7 @@ describe('Harbor Assistant camera component', () => {
     spectator = createComponent();
 
     spectator.component.captureSnapshot();
-    snapshotSubject.next({
+    snapshotSubject$.next({
       media_item: {
         device_id: 'cam-1',
         file_path: '/library/snapshots/cam-1.jpg',
@@ -2227,17 +2233,17 @@ describe('Harbor Assistant camera component', () => {
         indexed: false,
       },
     });
-    snapshotSubject.complete();
+    snapshotSubject$.complete();
     spectator.detectChanges();
 
-    expect(spectator.queryAll('.recent-media-card.snapshot.pending').length).toBe(0);
+    expect(spectator.queryAll('.recent-media-card.snapshot.pending')).toHaveLength(0);
     expect(spectator.component.timelineItems()[0].file_path).toBe('/library/snapshots/cam-1.jpg');
     tick(3000);
     discardPeriodicTasks();
   }));
 
   it('opens DVR media in an inline viewer instead of a popup', fakeAsync(() => {
-    const windowOpen = jest.spyOn(window, 'open').mockImplementation(() => null);
+    const windowOpen = jest.spyOn(globalThis, 'open').mockImplementation(() => null);
     spectator = createComponent();
     spectator.detectChanges();
 
@@ -2339,7 +2345,7 @@ describe('Harbor Assistant camera component', () => {
     const componentState = spectator.component as unknown as {
       dvrTimeline: { set: (items: unknown[]) => void };
       optimisticMediaItems: { set: (items: unknown[]) => void };
-      timelineItems: () => Array<{ file_path: string }>;
+      timelineItems: () => { file_path: string }[];
     };
 
     componentState.optimisticMediaItems.set([
@@ -2399,8 +2405,8 @@ describe('Harbor Assistant camera component', () => {
   }));
 
   it('shows a starting recording badge before the start request resolves', fakeAsync(() => {
-    const startSubject = new Subject<HarborAssistantSearchDvrStatusResponse>();
-    api.startDvrRecording = jest.fn(() => startSubject.asObservable());
+    const startSubject$ = new Subject<HarborAssistantSearchDvrStatusResponse>();
+    api.startDvrRecording = jest.fn(() => startSubject$.asObservable());
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
       selectedStreamProfile: { set: (value: 'sub' | 'main') => void };
@@ -2414,8 +2420,8 @@ describe('Harbor Assistant camera component', () => {
     expect(spectator.query('.recording-badge')).toHaveText('Starting');
 
     api.dvrStatus = jest.fn(() => of(dvrStatus('recording')));
-    startSubject.next(dvrStatus('recording'));
-    startSubject.complete();
+    startSubject$.next(dvrStatus('recording'));
+    startSubject$.complete();
     spectator.detectChanges();
 
     expect(spectator.query('.recording-badge')).toHaveText('REC');
@@ -2425,8 +2431,8 @@ describe('Harbor Assistant camera component', () => {
 
   it('shows finalizing state and a pending recording card while stopping', fakeAsync(() => {
     api.dvrStatus = jest.fn(() => of(dvrStatus('recording')));
-    const stopSubject = new Subject<HarborAssistantSearchDvrStatusResponse>();
-    api.stopDvrRecording = jest.fn(() => stopSubject.asObservable());
+    const stopSubject$ = new Subject<HarborAssistantSearchDvrStatusResponse>();
+    api.stopDvrRecording = jest.fn(() => stopSubject$.asObservable());
     spectator = createComponent();
     spectator.detectChanges();
 
@@ -2436,8 +2442,8 @@ describe('Harbor Assistant camera component', () => {
     expect(spectator.query('.recording-badge')).toHaveText('Finalizing');
     expect(spectator.queryAll('.recent-media-card.pending').length).toBeGreaterThan(0);
 
-    stopSubject.next(dvrStatus('stopped'));
-    stopSubject.complete();
+    stopSubject$.next(dvrStatus('stopped'));
+    stopSubject$.complete();
     spectator.detectChanges();
     expect(spectator.query('.recording-badge')).toHaveText('Finalizing');
     tick(3000);
@@ -2448,7 +2454,7 @@ describe('Harbor Assistant camera component', () => {
     spectator = createComponent();
 
     spectator.component.captureSnapshot();
-    snapshotSubject.error({ message: 'archive failed' });
+    snapshotSubject$.error({ message: 'archive failed' });
     spectator.detectChanges();
     const componentState = spectator.component as unknown as {
       actionMessage: () => string | null;
@@ -2487,16 +2493,18 @@ function cameraState(options: {
           ptz: false,
         },
       },
-      ...(options.includeFixture ? [{
-        device_id: 'public-fixture-dvr',
-        name: 'Public DVR Fixture (not live camera)',
-        snapshot_url: '/ui/assets/fixture.jpg',
-        capabilities: {
-          snapshot: false,
-          stream: false,
-          ptz: false,
-        },
-      }] : []),
+      ...(options.includeFixture
+        ? [{
+            device_id: 'public-fixture-dvr',
+            name: 'Public DVR Fixture (not live camera)',
+            snapshot_url: '/ui/assets/fixture.jpg',
+            capabilities: {
+              snapshot: false,
+              stream: false,
+              ptz: false,
+            },
+          }]
+        : []),
     ],
   };
 }
@@ -2558,7 +2566,7 @@ function videoEvent(type: string, video: HTMLVideoElement): Event {
   return event;
 }
 
-function fakeTimeRanges(ranges: Array<readonly [number, number]>): TimeRanges {
+function fakeTimeRanges(ranges: (readonly [number, number])[]): TimeRanges {
   return {
     length: ranges.length,
     start: jest.fn((index: number) => ranges[index]?.[0] ?? 0),
@@ -2566,7 +2574,9 @@ function fakeTimeRanges(ranges: Array<readonly [number, number]>): TimeRanges {
   } as unknown as TimeRanges;
 }
 
-function liveSession(options: Partial<HarborAssistantCameraLiveSessionResponse> = {}): HarborAssistantCameraLiveSessionResponse {
+function liveSession(
+  options: Partial<HarborAssistantCameraLiveSessionResponse> = {},
+): HarborAssistantCameraLiveSessionResponse {
   return {
     device_id: 'cam-1',
     session_id: 'live-test',

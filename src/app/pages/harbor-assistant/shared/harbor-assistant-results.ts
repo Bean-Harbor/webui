@@ -1,3 +1,4 @@
+import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 import {
   HarborAssistantSearchResultFilter,
   HarborAssistantSearchHit,
@@ -6,9 +7,8 @@ import {
   HarborAssistantSearchSourceScope,
   HarborAssistantSearchWaterfallItem,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
-import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 
-const DEFAULT_LIMIT = 24;
+const defaultLimit = 24;
 
 export interface HarborAssistantSearchScope {
   cameraId?: string | null;
@@ -20,7 +20,7 @@ export interface HarborAssistantSearchScope {
 export function buildHarborAssistantSearchPayload(
   query: string,
   filter: HarborAssistantSearchResultFilter,
-  limit = DEFAULT_LIMIT,
+  limit = defaultLimit,
   scope: HarborAssistantSearchScope = {},
 ): HarborAssistantSearchRequest {
   const payload: HarborAssistantSearchRequest = {
@@ -93,8 +93,7 @@ export function buildHarborAssistantSearchWaterfallItems(
 
 export function harborAssistantSearchHasNoResults(response: HarborAssistantSearchResponse | null): boolean {
   return Boolean(
-    response
-    && response.images.length === 0
+    response?.images.length === 0
     && response.documents.length === 0
     && response.videos.length === 0,
   );

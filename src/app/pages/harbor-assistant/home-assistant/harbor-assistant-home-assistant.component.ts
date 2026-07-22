@@ -1,5 +1,5 @@
-import { ChangeDetectionStrategy, Component, DestroyRef, OnInit, computed, inject, signal } from '@angular/core';
 import { NgClass } from '@angular/common';
+import { ChangeDetectionStrategy, Component, DestroyRef, OnInit, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms';
 import { MatButton } from '@angular/material/button';
@@ -96,11 +96,13 @@ export class HarborAssistantHomeAssistantComponent implements OnInit {
     allowedCameras: [''],
     cameraEntityBindings: [''],
   });
+
   protected readonly entityFilterForm = this.fb.group({
     query: [''],
     domain: ['all'],
     readiness: ['all'],
   });
+
   protected readonly entityFilters = signal({ query: '', domain: 'all', readiness: 'all' });
   protected readonly readinessOptions = [
     { label: T('All readiness'), value: 'all' },
@@ -204,8 +206,9 @@ export class HarborAssistantHomeAssistantComponent implements OnInit {
 
   protected readonly domainOptions = computed(() => {
     const domains = new Set(this.entities().map((entity) => entity.domain).filter(Boolean));
-    return Array.from(domains).sort();
+    return Array.from(domains).sort((left, right) => left.localeCompare(right));
   });
+
   protected readonly visibleEntities = computed(() => {
     const filters = this.entityFilters();
     const query = filters.query.trim().toLowerCase();
@@ -221,6 +224,7 @@ export class HarborAssistantHomeAssistantComponent implements OnInit {
       })
       .slice(0, 48);
   });
+
   protected readonly syncScopeDomains = computed(() => this.status()?.exposed_domains ?? []);
   protected readonly visibleServiceDomains = computed(() => this.serviceDomains().slice(0, 12));
 
@@ -418,9 +422,11 @@ export class HarborAssistantHomeAssistantComponent implements OnInit {
     }
     const trimmed = value.trim();
     const numericTimestamp = /^\d{10,13}$/.test(trimmed) ? Number(trimmed) : NaN;
-    const date = Number.isFinite(numericTimestamp)
-      ? new Date(trimmed.length === 10 ? numericTimestamp * 1000 : numericTimestamp)
-      : new Date(trimmed);
+    let date = new Date(trimmed);
+    if (Number.isFinite(numericTimestamp)) {
+      const timestampMs = trimmed.length === 10 ? numericTimestamp * 1000 : numericTimestamp;
+      date = new Date(timestampMs);
+    }
     if (!Number.isNaN(date.getTime())) {
       return date.toLocaleString();
     }
@@ -463,13 +469,13 @@ export class HarborAssistantHomeAssistantComponent implements OnInit {
 
   private runAction<T>(
     action: string,
-    request: Observable<T>,
+    request$: Observable<T>,
     onSuccess: (response: T) => void,
   ): void {
     this.actionInProgress.set(action);
     this.error.set(null);
     this.message.set(null);
-    request.pipe(
+    request$.pipe(
       finalize(() => this.actionInProgress.set(null)),
     ).subscribe({
       next: onSuccess,
@@ -477,8 +483,8 @@ export class HarborAssistantHomeAssistantComponent implements OnInit {
     });
   }
 
-  private result<T>(request: Observable<T>): Observable<EndpointResult<T>> {
-    return request.pipe(
+  private result<T>(request$: Observable<T>): Observable<EndpointResult<T>> {
+    return request$.pipe(
       map((data): EndpointResult<T> => ({ data, error: null })),
       catchError((error: unknown) => of({ data: null, error: this.getErrorMessage(error) })),
     );
@@ -487,7 +493,7 @@ export class HarborAssistantHomeAssistantComponent implements OnInit {
   private parseList(value: string, lowercase = false): string[] {
     return value
       .split(/\r?\n|,/)
-      .map((item) => lowercase ? item.trim().toLowerCase() : item.trim())
+      .map((item) => (lowercase ? item.trim().toLowerCase() : item.trim()))
       .filter((item, index, values) => item.length > 0 && values.indexOf(item) === index);
   }
 

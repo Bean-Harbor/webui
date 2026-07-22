@@ -240,10 +240,10 @@ describe('Harbor Assistant content API service', () => {
     );
     expect(sources).toContain("this.apiUrl('/cameras/recordings/status')");
     expect(sources).toContain(
-      'this.apiUrl(`/cameras/${encodeURIComponent(deviceId)}/recordings/start`)',
+      ['this.apiUrl(`/cameras/$', '{encodeURIComponent(deviceId)}/recordings/start`)'].join(''),
     );
     expect(sources).toContain(
-      'this.apiUrl(`/cameras/${encodeURIComponent(deviceId)}/snapshot`)',
+      ['this.apiUrl(`/cameras/$', '{encodeURIComponent(deviceId)}/snapshot`)'].join(''),
     );
     expect(sources).not.toContain('/api/harbor-assistant');
     [

@@ -107,7 +107,7 @@ export interface HarborAssistantSearchDvrStatusResponse {
 export interface HarborAssistantCameraLiveSessionResponse {
   device_id: string;
   session_id?: string | null;
-  status: 'starting' | 'running' | 'stopped' | 'failed' | 'degraded' | string;
+  status: string;
   playlist_url?: string | null;
   playlist_ready: boolean;
   webrtc_url?: string | null;
@@ -115,7 +115,7 @@ export interface HarborAssistantCameraLiveSessionResponse {
   webrtc_message?: string | null;
   mode: string;
   codec: string;
-  stream_profile?: 'sub' | 'main' | string;
+  stream_profile?: string;
   started_at?: string | null;
   updated_at: string;
   message?: string | null;
@@ -163,7 +163,7 @@ export interface HarborAssistantSearchDvrTimelineSegment {
   device_id: string;
   file_path: string;
   sidecar_path?: string | null;
-  media_kind?: 'snapshot' | 'recording' | string;
+  media_kind?: string;
   stream_kind: string;
   started_at: string;
   created_at?: string;

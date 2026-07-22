@@ -24,7 +24,7 @@ if (!buildConfig) {
 
   const replacements = new Map(buildConfig.fileReplacements.map((item) => [item.replace, item.with]));
   const expected = new Map([
-    ['src/app/app.component.ts', 'src/app/app.component.harbornavi.ts'],
+    ['src/app/app.component.ts', 'src/app/app-harbornavi.component.ts'],
     ['src/app/app.routes.ts', 'src/app/app.routes.harbornavi.ts'],
     ['src/main.ts', 'src/main.harbornavi.ts'],
     [
@@ -33,11 +33,11 @@ if (!buildConfig) {
     ],
     [
       'src/app/modules/page-header/page-title-header/page-header.component.ts',
-      'src/app/modules/page-header/page-title-header/page-header.component.harbornavi.ts',
+      'src/app/modules/page-header/page-title-header/page-header-harbornavi.component.ts',
     ],
     [
       'src/app/pages/file-manager/folder-picker-dialog/folder-picker-dialog.component.ts',
-      'src/app/pages/file-manager/folder-picker-dialog/folder-picker-dialog.component.harbornavi.ts',
+      'src/app/pages/file-manager/folder-picker-dialog/folder-picker-dialog-harbornavi.component.ts',
     ],
   ]);
   for (const [replace, withPath] of expected) {
@@ -96,9 +96,9 @@ for (const required of [
 for (const forbidden of ['/api/harbor-assistant', '192.168.3.82']) {
   for (const path of [
     'src/app/app.routes.harbornavi.ts',
-    'src/app/app.component.harbornavi.ts',
+    'src/app/app-harbornavi.component.ts',
     'src/app/pages/harbor-assistant/services/harbor-assistant-api-prefix.harbornavi.ts',
-    'src/app/pages/file-manager/folder-picker-dialog/folder-picker-dialog.component.harbornavi.ts',
+    'src/app/pages/file-manager/folder-picker-dialog/folder-picker-dialog-harbornavi.component.ts',
     'scripts/harbornavi-k3/build-deb.sh',
     'docs/harbornavi-k3-webui.md',
   ]) {

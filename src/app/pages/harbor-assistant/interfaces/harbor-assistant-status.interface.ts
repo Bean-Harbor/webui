@@ -83,7 +83,7 @@ export interface HomeAssistantEntity {
   state: string;
   display_name: string;
   source?: string;
-  readiness?: 'read_only' | 'safe_control' | 'unsupported' | string;
+  readiness?: string;
   automation_role?: string;
   automation_reference_allowed?: boolean;
   safe_control?: boolean;
@@ -284,7 +284,7 @@ export interface DvrTimelineSegment {
   device_id: string;
   file_path: string;
   sidecar_path?: string | null;
-  media_kind?: 'snapshot' | 'recording' | string;
+  media_kind?: string;
   stream_kind: string;
   started_at: string;
   created_at?: string;
@@ -538,7 +538,7 @@ export interface DeviceMetadataPatchPayload {
   requires_auth?: boolean | null;
 }
 
-export interface RtspCheckPayload extends DeviceCredentialsPayload {}
+export type RtspCheckPayload = DeviceCredentialsPayload;
 
 export interface RtspCheckResult {
   device_id: string;
@@ -553,7 +553,7 @@ export interface RtspCheckResult {
 
 export interface DeviceEvidenceResult {
   id?: string;
-  kind: 'rtsp_check' | 'snapshot' | 'share_link' | 'credential_status' | string;
+  kind: string;
   status?: string;
   summary?: string;
   detail?: string;
@@ -851,16 +851,6 @@ export interface HardwareReadinessComponent {
   evidence?: string[];
 }
 
-export type ModelCapabilityStatusValue =
-  | 'ready'
-  | 'needs_model'
-  | 'needs_runtime'
-  | 'downloading'
-  | 'installed_not_running'
-  | 'degraded'
-  | 'unsupported'
-  | string;
-
 export interface ModelCapabilityCurrentModel {
   model_endpoint_id: string;
   model_name: string;
@@ -893,7 +883,7 @@ export interface ModelCapabilityStatus {
   capability_id: string;
   label: string;
   model_kind: string;
-  status: ModelCapabilityStatusValue;
+  status: string;
   selected_model_id?: string | null;
   runtime_model_id?: string | null;
   current_model?: ModelCapabilityCurrentModel | null;
@@ -1080,7 +1070,7 @@ export interface HarborOsStatusResponse {
 export interface HarborOsImCapabilityItem {
   capability_id: string;
   label: string;
-  capability_class: 'safe_query' | 'approval_required_action' | 'unsupported_high_risk' | string;
+  capability_class: string;
   im_ready: boolean;
   risk_level: string;
   approval_required: boolean;

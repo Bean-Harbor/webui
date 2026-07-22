@@ -36,7 +36,7 @@
             {{ 'Refresh' | translate }}
           </button>
           @if (homeAssistantUrl(); as url) {
-            <a mat-button color="primary" [href]="url" target="_blank" rel="noopener">
+            <a mat-button color="primary" target="_blank" rel="noopener" [href]="url">
               {{ 'Open HA' | translate }}
             </a>
           }

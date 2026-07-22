@@ -9,9 +9,23 @@ import { MatDialog } from '@angular/material/dialog';
 import { MatProgressBar } from '@angular/material/progress-bar';
 import { MatTab, MatTabGroup } from '@angular/material/tabs';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
+import Hls from 'hls.js';
 import { forkJoin, fromEvent, Observable, of, timer } from 'rxjs';
 import { catchError, finalize, shareReplay, switchMap, tap } from 'rxjs/operators';
-import Hls from 'hls.js';
+import { WINDOW } from 'app/helpers/window.helper';
+import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
+import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
+import {
+  buildHarborAssistantSearchPayload,
+  buildHarborAssistantSearchWaterfallItems,
+  harborAssistantSearchErrorMessage,
+  harborAssistantSearchHasNoResults,
+  harborAssistantSearchSameOriginAdminUrl,
+} from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
+import {
+  HarborTimeRangeDialogComponent,
+  HarborTimeRangeValue,
+} from 'app/pages/harbor-assistant/shared/harbor-assistant-time-range-dialog.component';
 import {
   HarborAssistantCameraLiveSessionResponse,
   HarborAssistantHarborLinkCapabilitiesResponse,
@@ -25,19 +39,6 @@ import {
   HarborAssistantSearchSourceScope,
   HarborAssistantSearchWaterfallItem,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
-import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
-import {
-  buildHarborAssistantSearchPayload,
-  buildHarborAssistantSearchWaterfallItems,
-  harborAssistantSearchErrorMessage,
-  harborAssistantSearchHasNoResults,
-  harborAssistantSearchSameOriginAdminUrl,
-} from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
-import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
-import {
-  HarborTimeRangeDialogComponent,
-  HarborTimeRangeValue,
-} from 'app/pages/harbor-assistant/shared/harbor-assistant-time-range-dialog.component';
 import {
   HarborAssistantLiveControlsComponent,
   HarborAssistantLivePlaybackMode,
@@ -108,6 +109,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly destroyRef = inject(DestroyRef);
   private readonly dialog = inject(MatDialog);
   private readonly translate = inject(TranslateService);
+  private readonly window = inject<Window>(WINDOW);
   @ViewChild('liveImage') private liveImage?: ElementRef<HTMLImageElement>;
   @ViewChild('liveTransitionFrame') private liveTransitionFrame?: ElementRef<HTMLCanvasElement>;
   @ViewChild('liveVideo') private liveVideo?: ElementRef<HTMLVideoElement>;
@@ -370,11 +372,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const fallbackSelection = liveDevices[0]?.device_id
       ?? devices.find((device) => device.device_id !== this.fixtureCameraId)?.device_id
       ?? null;
-    const selected = currentSelection && currentIsLive
-      ? currentSelection
-      : defaultIsLive
-        ? defaultSelection
-        : fallbackSelection;
+    let selected = fallbackSelection;
+    if (defaultIsLive) {
+      selected = defaultSelection;
+    }
+    if (currentSelection && currentIsLive) {
+      selected = currentSelection;
+    }
     this.cameras.set(devices);
     if (selected !== currentSelection) {
       this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(selected));
@@ -471,7 +475,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   openHarborAssistantModels(): void {
-    window.open('/ui/harbor-assistant?tab=settings&section=ai&focus=semantic-index', '_blank', 'noopener');
+    this.window.open('/ui/harbor-assistant?tab=settings&section=ai&focus=semantic-index', '_blank', 'noopener');
   }
 
   selectedCameraIsFixture(): boolean {
@@ -528,7 +532,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   openPreview(item: HarborAssistantSearchWaterfallItem): void {
-    window.open(item.previewUrl, '_blank', 'noopener');
+    this.window.open(item.previewUrl, '_blank', 'noopener');
   }
 
   openReplay(segment: HarborAssistantSearchMediaItem): void {
@@ -684,7 +688,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       && this.hlsWarmSessionMatches(this.hlsWarmSession, deviceId, streamProfile)
       ? this.hlsWarmSession
       : null;
-    const warmStartRequest = this.hlsWarmStartRequest
+    const warmStartRequest$ = this.hlsWarmStartRequest
       && this.hlsWarmStartRequestMatches(this.hlsWarmStartRequest, deviceId, streamProfile)
       ? this.hlsWarmStartRequest.request$
       : null;
@@ -696,15 +700,15 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.resetLivePlaybackUserPause();
     this.stopHlsPlayback();
     this.resetLiveControlTimeline();
-    const startRequest = warmSession?.session_id
+    const startRequest$ = warmSession?.session_id
       ? this.api.renewCameraLiveSession(
-        warmSession.device_id,
-        warmSession.session_id,
-        this.liveSessionTtlSeconds,
-      ).pipe(catchError(() => this.api.startCameraLiveSession(deviceId, streamProfile)))
-      : warmStartRequest ?? this.api.startCameraLiveSession(deviceId, streamProfile);
+          warmSession.device_id,
+          warmSession.session_id,
+          this.liveSessionTtlSeconds,
+        ).pipe(catchError(() => this.api.startCameraLiveSession(deviceId, streamProfile)))
+      : warmStartRequest$ ?? this.api.startCameraLiveSession(deviceId, streamProfile);
     this.refreshHarborLinkCapabilitiesForLive().pipe(
-      switchMap(() => startRequest),
+      switchMap(() => startRequest$),
       takeUntilDestroyed(this.destroyRef),
       finalize(() => {
         if (this.actionBusy() === 'live') {
@@ -789,14 +793,17 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
           this.showLiveFeedback('Live unavailable. Falling back to snapshots.', 2200);
           return;
         }
-        window.setTimeout(() => this.waitForHlsPlaylist(status, attempt + 1), this.hlsPlaylistPollIntervalMs);
+        this.window.setTimeout(
+          () => this.waitForHlsPlaylist(status, attempt + 1),
+          this.hlsPlaylistPollIntervalMs,
+        );
       },
       error: (error: unknown) => {
         if (this.hlsLiveSession()?.session_id !== sessionId) {
           return;
         }
         if (attempt * this.hlsPlaylistPollIntervalMs < this.hlsPlaylistMaxWaitMs) {
-          window.setTimeout(
+          this.window.setTimeout(
             () => this.waitForHlsPlaylist(session, attempt + 1),
             this.hlsPlaylistPollIntervalMs,
           );
@@ -811,7 +818,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private scheduleHlsLivePrewarm(): void {
     this.clearHlsWarmTimer();
-    this.hlsWarmTimer = window.setTimeout(() => {
+    this.hlsWarmTimer = this.window.setTimeout(() => {
       this.hlsWarmTimer = null;
       this.ensureHlsLivePrewarm();
     }, this.hlsPrewarmDelayMs);
@@ -848,7 +855,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       }),
       shareReplay({ bufferSize: 1, refCount: false }),
     );
-    this.hlsWarmStartRequest = { deviceId, streamProfile, token, request$ };
+    this.hlsWarmStartRequest = {
+      deviceId, streamProfile, token, request$,
+    };
     request$.subscribe({
       next: (session) => {
         if (!this.hlsWarmPrewarmCanContinue(session, token)) {
@@ -882,7 +891,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     this.clearHlsWarmTimer();
-    this.hlsWarmTimer = window.setTimeout(() => {
+    this.hlsWarmTimer = this.window.setTimeout(() => {
       this.hlsWarmTimer = null;
       if (!this.hlsWarmPrewarmCanContinue(session, token)) {
         return;
@@ -979,7 +988,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (this.hlsWarmTimer === null) {
       return;
     }
-    window.clearTimeout(this.hlsWarmTimer);
+    this.window.clearTimeout(this.hlsWarmTimer);
     this.hlsWarmTimer = null;
   }
 
@@ -990,7 +999,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     const deviceId = session.device_id;
     const sessionId = session.session_id;
-    this.liveSessionRenewTimer = window.setTimeout(() => {
+    this.liveSessionRenewTimer = this.window.setTimeout(() => {
       this.liveSessionRenewTimer = null;
       if (
         this.hlsLiveStatus() === 'stopped'
@@ -1028,7 +1037,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (this.liveSessionRenewTimer === null) {
       return;
     }
-    window.clearTimeout(this.liveSessionRenewTimer);
+    this.window.clearTimeout(this.liveSessionRenewTimer);
     this.liveSessionRenewTimer = null;
   }
 
@@ -1393,7 +1402,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     if (video.paused) {
-      void video.play();
+      video.play().catch((): void => undefined);
     } else {
       video.pause();
     }
@@ -1604,7 +1613,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   openCameraSettings(): void {
-    window.open('/ui/harbor-assistant?tab=settings&section=camera', '_blank', 'noopener');
+    this.window.open('/ui/harbor-assistant?tab=settings&section=camera', '_blank', 'noopener');
   }
 
   selectedSnapshotUrl(): string | null {
@@ -1843,7 +1852,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   fullscreenMediaViewer(): void {
     const media = this.mediaViewer?.nativeElement.querySelector('video, img') as HTMLElement | null;
     const target = media ?? this.mediaViewer?.nativeElement;
-    void target?.requestFullscreen?.();
+    target?.requestFullscreen?.().catch((): void => undefined);
   }
 
   private localDateTimeToUnixSeconds(value: string): string | null {
@@ -1859,7 +1868,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   private formatLocalDateTimeLabel(value: string): string {
-    const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);
     if (!match) {
       return '';
     }
@@ -1929,7 +1938,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private prependTimelineItem(item: HarborAssistantSearchDvrTimelineSegment): void {
     const normalized = this.normalizeTimelineItem(item);
     const existing = this.dvrTimeline().filter((segment) => segment.file_path !== item.file_path);
-    this.dvrTimeline.set([normalized, ...existing].sort((left, right) => this.mediaTimestamp(right) - this.mediaTimestamp(left)));
+    this.dvrTimeline.set(
+      [normalized, ...existing].sort((left, right) => this.mediaTimestamp(right) - this.mediaTimestamp(left)),
+    );
   }
 
   private prependOptimisticSnapshot(deviceId: string, previewUrl: string): string {
@@ -1985,7 +1996,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     return optimisticKey;
   }
 
-  private replaceOptimisticMediaItem(optimisticKey: string | null, item: HarborAssistantSearchDvrTimelineSegment): void {
+  private replaceOptimisticMediaItem(
+    optimisticKey: string | null,
+    item: HarborAssistantSearchDvrTimelineSegment,
+  ): void {
     const optimisticItem = optimisticKey
       ? this.optimisticMediaItems().find((segment) => segment.optimistic_key === optimisticKey)
       : null;
@@ -2068,7 +2082,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     return segment.created_at || segment.started_at || segment.ended_at;
   }
 
-  private normalizeTimelineItem(item: HarborAssistantSearchDvrTimelineSegment, displayAt?: string | null): HarborAssistantSearchMediaItem {
+  private normalizeTimelineItem(
+    item: HarborAssistantSearchDvrTimelineSegment,
+    displayAt?: string | null,
+  ): HarborAssistantSearchMediaItem {
     const mediaKind = item.media_kind || 'recording';
     if (displayAt && mediaKind === 'recording') {
       return { ...item, local_display_at: displayAt };
@@ -2113,7 +2130,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     });
   }
 
-  private searchScopeForQuery(query: string): { filter: HarborAssistantSearchResultFilter; cameraId: string | null; sourceScope: HarborAssistantSearchSourceScope } {
+  private searchScopeForQuery(query: string): {
+    filter: HarborAssistantSearchResultFilter;
+    cameraId: string | null;
+    sourceScope: HarborAssistantSearchSourceScope;
+  } {
     const suggestion = this.matchPromptSuggestion(query);
     if (suggestion?.sourceScope) {
       if (this.form.controls.filter.value !== suggestion.filter) {
@@ -2135,7 +2156,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     };
   }
 
-  private normalizeTimelineSegmentsForDisplay(deviceId: string, segments: HarborAssistantSearchDvrTimelineSegment[]): HarborAssistantSearchMediaItem[] {
+  private normalizeTimelineSegmentsForDisplay(
+    deviceId: string,
+    segments: HarborAssistantSearchDvrTimelineSegment[],
+  ): HarborAssistantSearchMediaItem[] {
     const pendingRecordings = this.optimisticMediaItems().filter((segment) => {
       return segment.device_id === deviceId
         && this.mediaKind(segment) === 'recording'
@@ -2147,7 +2171,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         return this.normalizeTimelineItem(segment);
       }
       const pending = pendingRecordings.find((item) => {
-        return Math.abs(Number(segment.ended_at || segment.created_at || segment.started_at || 0) - this.mediaTimestamp(item)) <= 30;
+        const segmentTimestamp = Number(
+          segment.ended_at || segment.created_at || segment.started_at || 0,
+        );
+        return Math.abs(segmentTimestamp - this.mediaTimestamp(item)) <= 30;
       });
       return this.normalizeTimelineItem(segment, pending?.local_display_at);
     });
@@ -2273,7 +2300,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       this.webrtcAttachToken = token;
       this.webrtcPlaybackPending = true;
     }
-    window.setTimeout(() => {
+    this.window.setTimeout(() => {
       if (this.webrtcAttachToken !== token || this.webrtcLiveUrl() !== url) {
         return;
       }
@@ -2323,7 +2350,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       if (peerConnection.connectionState === 'failed') {
         this.fallbackToHlsPlayback('WebRTC connection failed.');
       } else if (peerConnection.connectionState === 'disconnected') {
-        window.setTimeout(() => {
+        this.window.setTimeout(() => {
           if (
             this.webrtcAttachToken === token
             && this.webrtcPeerConnection === peerConnection
@@ -2352,7 +2379,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     const answer = await response.text();
     const location = response.headers.get('Location');
-    const negotiatedResourceUrl = location ? new URL(location, window.location.href).toString() : null;
+    const negotiatedResourceUrl = location ? new URL(location, this.window.location.href).toString() : null;
     if (this.webrtcAttachToken !== token) {
       peerConnection.close();
       this.deleteWhepResource(negotiatedResourceUrl);
@@ -2429,11 +2456,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         if (peerConnection.iceGatheringState !== 'complete') {
           return;
         }
-        window.clearTimeout(timeout);
+        this.window.clearTimeout(timeout);
         peerConnection.removeEventListener('icegatheringstatechange', handleStateChange);
         resolve();
       };
-      timeout = window.setTimeout(() => {
+      timeout = this.window.setTimeout(() => {
         peerConnection.removeEventListener('icegatheringstatechange', handleStateChange);
         reject(new Error('WebRTC ICE gathering timed out'));
       }, 5_000);
@@ -2599,7 +2626,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (attempt === 0) {
       this.hlsAttachToken = token;
     }
-    window.setTimeout(() => {
+    this.window.setTimeout(() => {
       if (
         this.hlsAttachToken !== token
         || this.hlsLiveUrl() !== url
@@ -2771,7 +2798,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (!url || this.livePlaybackUserPaused || (this.livePlaybackUserDelayed && !allowDelayedPlayback)) {
       return;
     }
-    window.setTimeout(() => {
+    this.window.setTimeout(() => {
       if (
         this.hlsPlaybackToken !== token
         || this.hlsLiveUrl() !== url
@@ -2811,7 +2838,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     this.pendingProgrammaticLivePlayToken = request.token;
-    void video.play().then(() => {
+    video.play().then(() => {
       this.completeProgrammaticLivePlayRequest(request.token);
       if (this.livePlaybackUserPaused) {
         this.pauseLiveVideoSilently(video);
@@ -2978,7 +3005,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private startLiveEdgeMonitor(): void {
     this.stopLiveEdgeMonitor();
-    this.liveEdgeMonitor = window.setInterval(() => {
+    this.liveEdgeMonitor = this.window.setInterval(() => {
       if (this.hlsLiveStatus() !== 'live') {
         return;
       }
@@ -2994,7 +3021,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (this.liveEdgeMonitor === null) {
       return;
     }
-    window.clearInterval(this.liveEdgeMonitor);
+    this.window.clearInterval(this.liveEdgeMonitor);
     this.liveEdgeMonitor = null;
   }
 
