@@ -1,4 +1,4 @@
-@import 'scss-imports/cssvars';
+@import "scss-imports/cssvars";
 
 .card {
   box-sizing: border-box;
@@ -41,7 +41,7 @@
   }
 }
 
-mat-grid-list[cols='2'] {
+mat-grid-list[cols="2"] {
   ul li:nth-child(2) {
     .value {
       font-size: 11px;

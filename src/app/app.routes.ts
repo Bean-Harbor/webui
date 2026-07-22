@@ -35,7 +35,7 @@ export const rootRoutes: Routes = [
   {
     path: 'featured-photos/gallery',
     loadComponent: () => import('app/pages/featured-photos/featured-photos.component')
-      .then((module) => module.FeaturedPhotosComponent),
+      .then((m) => m.FeaturedPhotosComponent),
     // No guards — this route must be accessible without WebSocket or auth session.
     canActivate: [],
   },

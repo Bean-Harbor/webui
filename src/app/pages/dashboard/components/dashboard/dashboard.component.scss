@@ -1,6 +1,6 @@
-@import 'scss-imports/cssvars';
-@import 'mixins/text';
-@import '../../dashboard-variables';
+@import "scss-imports/cssvars";
+@import "mixins/text";
+@import "../../dashboard-variables";
 
 :host ::ng-deep {
   ix-breadcrumb {

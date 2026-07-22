@@ -24,7 +24,7 @@ body .mat-mdc-icon-button {
     background-color: transparent !important;
   }
 
-  *[role='img'] {
+  *[role="img"] {
     font-size: $icon-size;
     height: $icon-size;
     line-height: $icon-size;
@@ -47,7 +47,7 @@ body .mat-mdc-icon-button {
 }
 
 table td .mdc-icon-button {
-  *[role='img'] {
+  *[role="img"] {
     align-items: center;
     display: flex;
     height: $button-size;

@@ -1,4 +1,4 @@
-@import 'scss-imports/cssvars';
+@import "scss-imports/cssvars";
 
 .card {
   box-sizing: border-box;
@@ -23,6 +23,7 @@
 
   .card {
     &.half {
+
       .product-logo-container,
       .overview {
         display: none;

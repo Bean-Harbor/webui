@@ -1,6 +1,6 @@
-import { adminRoutes } from './admin.routes';
-
 jest.mock('dygraphs/src/extras/smooth-plotter.js', () => jest.fn());
+
+import { adminRoutes } from './admin.routes';
 
 describe('admin routes', () => {
   it('keeps direct Harbor Assistant routing available', () => {

@@ -18,27 +18,15 @@ const dirname = path.dirname(filename);
 const swPath = path.join(dirname, '..', 'dist', 'sw.js');
 const swSourcePath = path.join(dirname, '..', 'src', 'sw.js');
 
-function getGitHash(): string {
-  const providedGitHash = process.env.HARBORNAVI_BUILD_GIT_HASH?.trim();
-  if (providedGitHash) {
-    if (!/^[0-9a-f]{7,40}$/iu.test(providedGitHash)) {
-      throw new Error('HARBORNAVI_BUILD_GIT_HASH must be a 7-40 character hexadecimal commit hash.');
-    }
-
-    return providedGitHash;
-  }
-
+function updateServiceWorkerVersion(): void {
+  // Get current git commit hash (first 8 characters)
+  let gitHash = 'unknown';
   try {
     // eslint-disable-next-line sonarjs/no-os-command-from-path
-    return execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim();
+    gitHash = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim();
   } catch (error) {
     console.warn('Could not get git commit hash:', (error as Error).message);
-    return 'unknown';
   }
-}
-
-function updateServiceWorkerVersion(): void {
-  const gitHash = getGitHash();
 
   // Generate version string with timestamp and git hash
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');

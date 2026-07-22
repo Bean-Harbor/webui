@@ -26,12 +26,14 @@
 
     ix-checkbox {
       ::ng-deep {
-        mat-checkbox .mdc-form-field {
-          margin-right: 0;
-        }
+        mat-checkbox {
+          .mdc-form-field {
+            margin-right: 0;
+          }
 
-        mat-checkbox .mdc-checkbox {
-          padding: 0;
+          .mdc-checkbox {
+            padding: 0;
+          }
         }
 
         .ix-errors {

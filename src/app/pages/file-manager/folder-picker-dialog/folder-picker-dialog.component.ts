@@ -82,17 +82,14 @@ export class FolderPickerDialogComponent implements OnInit {
       .subscribe({
         next: (files) => {
           const pools = files
-            .filter((file) => file.type === FileType.Directory && !file.name.startsWith('.'))
-            .map((file) => ({
-              name: file.name,
-              path: file.path,
+            .filter((f) => f.type === FileType.Directory && !f.name.startsWith('.'))
+            .map((f) => ({
+              name: f.name,
+              path: f.path,
               icon: 'mdi-database',
               type: 'pool' as const,
             }));
-          this.locations.update((locations) => [
-            ...pools,
-            ...locations.filter((location) => location.type !== 'pool'),
-          ]);
+          this.locations.update((locs) => [...pools, ...locs.filter((l) => l.type !== 'pool')]);
         },
       });
 
@@ -122,10 +119,7 @@ export class FolderPickerDialogComponent implements OnInit {
               });
             }
           }
-          this.locations.update((locations) => [
-            ...locations.filter((location) => location.type !== 'usb'),
-            ...usbLocations,
-          ]);
+          this.locations.update((locs) => [...locs.filter((l) => l.type !== 'usb'), ...usbLocations]);
         },
       });
   }
@@ -156,10 +150,10 @@ export class FolderPickerDialogComponent implements OnInit {
       .subscribe({
         next: (files) => {
           // Only show directories, exclude hidden and excluded paths
-          const dirs = files.filter((file) => {
-            if (file.type !== FileType.Directory) return false;
-            if (file.name.startsWith('.')) return false;
-            if (this.data.excludePaths?.includes(file.path)) return false;
+          const dirs = files.filter((f) => {
+            if (f.type !== FileType.Directory) return false;
+            if (f.name.startsWith('.')) return false;
+            if (this.data.excludePaths?.includes(f.path)) return false;
             return true;
           });
           this.items.set(dirs);
@@ -210,7 +204,7 @@ export class FolderPickerDialogComponent implements OnInit {
 
   isCurrentLocationPool(): boolean {
     const path = this.currentPath();
-    return this.locations().some((location) => location.path === path);
+    return this.locations().some((l) => l.path === path);
   }
 
   /**

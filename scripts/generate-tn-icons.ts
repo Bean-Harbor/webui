@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 
 const root = process.cwd();
 const srcApp = path.join(root, 'src', 'app');
@@ -10,24 +9,8 @@ const outputDir = path.join(root, 'src', 'assets', 'tn-icons');
 const spritePath = path.join(outputDir, 'sprite.svg');
 const configPath = path.join(outputDir, 'sprite-config.json');
 
-type BuildSprite = (icons: Map<string, string>) => Promise<Record<string, { sprite: { contents: Buffer | null } }>>;
-type GetIconPaths = (names: Set<string>, projectRoot?: string) => Map<string, string>;
-
-const iconSpriteLibDir = path.join(
-  root,
-  'node_modules',
-  '@truenas',
-  'ui-components',
-  'scripts',
-  'icon-sprite',
-  'lib',
-);
-const { buildSprite } = await import(pathToFileURL(path.join(iconSpriteLibDir, 'build-sprite.ts')).href) as {
-  buildSprite: BuildSprite;
-};
-const { getIconPaths } = await import(pathToFileURL(path.join(iconSpriteLibDir, 'get-icon-paths.ts')).href) as {
-  getIconPaths: GetIconPaths;
-};
+const { buildSprite } = await import('../node_modules/@truenas/ui-components/scripts/icon-sprite/lib/build-sprite.ts');
+const { getIconPaths } = await import('../node_modules/@truenas/ui-components/scripts/icon-sprite/lib/get-icon-paths.ts');
 
 function walkFiles(dir: string, extensions: Set<string>): string[] {
   const files: string[] = [];
@@ -103,7 +86,7 @@ function addTemplateIcons(icons: Set<string>): void {
         continue;
       }
 
-      const simpleString = /^['"]([^'"]+)['"]$/.exec(boundName);
+      const simpleString = boundName.match(/^['"]([^'"]+)['"]$/);
       if (simpleString?.[1]) {
         icons.add(iconNameForLibrary(simpleString[1], library));
       }
@@ -172,7 +155,7 @@ fs.writeFileSync(spritePath, buffer);
 
 // eslint-disable-next-line sonarjs/hashing
 const hash = crypto.createHash('md5').update(buffer).digest('hex').slice(0, 10);
-const sortedIcons = Array.from(icons).sort((first, second) => first.localeCompare(second));
+const sortedIcons = Array.from(icons).sort();
 fs.writeFileSync(configPath, `${JSON.stringify({
   iconUrl: `assets/tn-icons/sprite.svg?v=${hash}`,
   icons: sortedIcons,
