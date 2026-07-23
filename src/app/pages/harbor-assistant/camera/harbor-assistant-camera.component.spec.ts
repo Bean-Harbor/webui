@@ -196,6 +196,7 @@ describe('Harbor Assistant camera component', () => {
       expect(fetchMock).toHaveBeenCalledWith('/api/harbor-link/media/harbor-live-test/whep', expect.objectContaining({
         body: 'offer-sdp',
         method: 'POST',
+        signal: expect.any(AbortSignal),
       }));
       peerConnection.ontrack?.({ streams: [mediaStream], track: videoTrack } as RTCTrackEvent);
 
@@ -278,6 +279,91 @@ describe('Harbor Assistant camera component', () => {
 
     expect(play).toHaveBeenCalledTimes(2);
     expect(componentState.hlsLiveError()).toBeNull();
+  }));
+
+  it('aborts WHEP negotiation when the total deadline expires', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      runWebRtcNegotiationWithDeadline: (
+        negotiation: Promise<void>,
+        abortController: AbortController,
+      ) => Promise<void>;
+    };
+    const abortController = new AbortController();
+    const negotiation = new Promise<void>(() => {
+      // Keep negotiation pending until the total deadline aborts it.
+    });
+    let failure: unknown = null;
+
+    componentState.runWebRtcNegotiationWithDeadline(
+      negotiation,
+      abortController,
+    ).catch((error: unknown) => {
+      failure = error;
+    });
+
+    expect(abortController.signal.aborted).toBe(false);
+    tick(12_000);
+    flushMicrotasks();
+
+    expect(abortController.signal.aborted).toBe(true);
+    expect(failure).toEqual(new Error('WebRTC negotiation timed out'));
+    discardPeriodicTasks();
+  }));
+
+  it('falls back to HLS when WHEP connects without rendering a first frame', fakeAsync(() => {
+    spectator = createComponent();
+    const peerConnection = {
+      close: jest.fn(),
+      onconnectionstatechange: null,
+      ontrack: null,
+    } as unknown as RTCPeerConnection;
+    const componentState = spectator.component as unknown as {
+      hlsLiveError: () => string | null;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      liveControlPlaybackMode: { set: (value: 'hls-fallback') => void } & (() => string);
+      scheduleWebRtcFirstFrameDeadline: (connection: RTCPeerConnection, token: number) => void;
+      startHlsPlaybackFromSession: jest.Mock;
+      webrtcAttachToken: number;
+      webrtcDegradedSessionId: string | null;
+      webrtcPeerConnection: RTCPeerConnection | null;
+      webrtcPlaybackPending: boolean;
+    };
+    componentState.hlsLiveSession.set(liveSession());
+    componentState.liveControlPlaybackMode.set('hls-fallback');
+    componentState.startHlsPlaybackFromSession = jest.fn(() => true);
+    componentState.webrtcAttachToken = 1;
+    componentState.webrtcPeerConnection = peerConnection;
+    componentState.webrtcPlaybackPending = true;
+
+    componentState.scheduleWebRtcFirstFrameDeadline(peerConnection, 1);
+    tick(10_000);
+
+    expect(componentState.liveControlPlaybackMode()).toBe('hls-fallback');
+    expect(componentState.hlsLiveError()).toContain('did not render a first frame');
+    expect(componentState.webrtcDegradedSessionId).toBe('live-test');
+    expect(peerConnection.close).toHaveBeenCalled();
+    expect(componentState.startHlsPlaybackFromSession).toHaveBeenCalledTimes(1);
+    discardPeriodicTasks();
+  }));
+
+  it('accepts only same-origin HarborLink media WHEP resource locations', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      validateWhepResourceUrl: (location: string | null) => string;
+    };
+
+    expect(componentState.validateWhepResourceUrl(
+      '/api/harbor-link/media/harbor-live-test/whep/session-1',
+    )).toBe('http://localhost/api/harbor-link/media/harbor-live-test/whep/session-1');
+    expect(() => componentState.validateWhepResourceUrl(
+      'https://example.com/api/harbor-link/media/harbor-live-test/whep/session-1',
+    )).toThrow('outside the allowed HarborLink media path');
+    expect(() => componentState.validateWhepResourceUrl(
+      '/api/harbor-beacon/media/harbor-live-test/whep/session-1',
+    )).toThrow('outside the allowed HarborLink media path');
+    expect(() => componentState.validateWhepResourceUrl(null)).toThrow('Location header');
+    discardPeriodicTasks();
   }));
 
   it('freezes the current WebRTC frame before attaching HLS time-shift playback', fakeAsync(() => {
@@ -453,11 +539,11 @@ describe('Harbor Assistant camera component', () => {
     componentState.webrtcAttachToken = 1;
 
     try {
-      await componentState.attachWhepPlayback(
+      await expect(componentState.attachWhepPlayback(
         video,
         '/api/harbor-link/media/harbor-live-test/whep',
         1,
-      );
+      )).rejects.toThrow('cancelled');
 
       expect(fetchMock).toHaveBeenCalledWith(
         'http://localhost/api/harbor-link/media/harbor-live-test/whep/session-1',
@@ -2119,6 +2205,63 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('retries startup HLS 404 responses before degrading the session', fakeAsync(() => {
+    spectator = createComponent();
+    const playlistUrl = '/api/beacon/cameras/cam-1/live/live-test/index.m3u8';
+    const hlsHandlers = new Map<string, (event: string, data: {
+      details: string;
+      fatal: boolean;
+      response?: { code: number };
+      type: string;
+    }) => void>();
+    const startLoad = jest.spyOn(Hls.prototype, 'startLoad').mockImplementation(jest.fn());
+    jest.spyOn(Hls, 'isSupported').mockReturnValue(true);
+    jest.spyOn(Hls.prototype, 'loadSource').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'attachMedia').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'destroy').mockImplementation(jest.fn());
+    jest.spyOn(Hls.prototype, 'on').mockImplementation((event, handler) => {
+      hlsHandlers.set(
+        event,
+        handler as (event: string, data: {
+          details: string;
+          fatal: boolean;
+          response?: { code: number };
+          type: string;
+        }) => void,
+      );
+    });
+    const componentState = spectator.component as unknown as {
+      attachHlsPlayback: () => boolean;
+      hlsLiveError: () => string | null;
+      hlsLiveStatus: {
+        set: (value: HlsLiveStatus) => void;
+      } & (() => string);
+      hlsLiveUrl: { set: (value: string | null) => void };
+      liveVideo?: { nativeElement: HTMLVideoElement };
+    };
+    componentState.hlsLiveUrl.set(playlistUrl);
+    componentState.hlsLiveStatus.set('starting');
+    componentState.liveVideo = { nativeElement: fakeLiveVideo() };
+
+    expect(componentState.attachHlsPlayback()).toBe(true);
+    hlsHandlers.get(Hls.Events.ERROR)?.('hlsError', {
+      details: 'fragLoadError',
+      fatal: true,
+      response: { code: 404 },
+      type: 'networkError',
+    });
+
+    expect(componentState.hlsLiveStatus()).toBe('starting');
+    expect(componentState.hlsLiveError()).toContain('retrying 1/5');
+    expect(startLoad).not.toHaveBeenCalled();
+
+    tick(1_000);
+
+    expect(startLoad).toHaveBeenCalledTimes(1);
+    expect(componentState.hlsLiveStatus()).toBe('starting');
+    discardPeriodicTasks();
+  }));
+
   it('freezes snapshot polling while recording is active', fakeAsync(() => {
     api.cameraState = jest.fn(() => of(cameraState({
       snapshotUrl: null,
@@ -2429,7 +2572,7 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it('shows finalizing state and a pending recording card while stopping', fakeAsync(() => {
+  it('reports a recording that never appears in Playback instead of finalizing forever', fakeAsync(() => {
     api.dvrStatus = jest.fn(() => of(dvrStatus('recording')));
     const stopSubject$ = new Subject<HarborAssistantSearchDvrStatusResponse>();
     api.stopDvrRecording = jest.fn(() => stopSubject$.asObservable());
@@ -2446,7 +2589,56 @@ describe('Harbor Assistant camera component', () => {
     stopSubject$.complete();
     spectator.detectChanges();
     expect(spectator.query('.recording-badge')).toHaveText('Finalizing');
-    tick(3000);
+    tick(9000);
+    spectator.detectChanges();
+
+    const componentState = spectator.component as unknown as {
+      actionError: () => string | null;
+      recordIntent: () => string | null;
+      timelineItems: () => { local_status?: string }[];
+    };
+    expect(componentState.recordIntent()).toBeNull();
+    expect(componentState.actionError()).toContain('did not appear in Playback');
+    expect(componentState.timelineItems()[0].local_status).toBe('finalize_failed');
+    discardPeriodicTasks();
+  }));
+
+  it('replaces the finalizing card when the saved recording appears in Playback', fakeAsync(() => {
+    const finalizedAt = Math.floor(Date.now() / 1000);
+    const finalizedTimeline: HarborAssistantSearchDvrTimelineResponse = {
+      ...dvrTimeline(),
+      segments: [{
+        ...dvrTimeline().segments[0],
+        file_path: 'harborlink://dvr/recording-1',
+        started_at: String(finalizedAt - 12),
+        created_at: String(finalizedAt - 12),
+        ended_at: String(finalizedAt),
+        replay_url: '/api/cameras/recordings/artifacts/recording-1',
+      }],
+    };
+    api.dvrStatus = jest.fn(() => of(dvrStatus('recording')));
+    api.dvrTimeline = jest.fn()
+      .mockReturnValueOnce(of(dvrTimeline()))
+      .mockReturnValue(of(finalizedTimeline));
+    const stopSubject$ = new Subject<HarborAssistantSearchDvrStatusResponse>();
+    api.stopDvrRecording = jest.fn(() => stopSubject$.asObservable());
+    spectator = createComponent();
+    spectator.detectChanges();
+
+    spectator.component.stopRecording();
+    stopSubject$.next(dvrStatus('stopped'));
+    stopSubject$.complete();
+    spectator.detectChanges();
+
+    const componentState = spectator.component as unknown as {
+      actionMessage: () => string | null;
+      recordIntent: () => string | null;
+      timelineItems: () => { file_path: string; optimistic_key?: string }[];
+    };
+    expect(componentState.recordIntent()).toBeNull();
+    expect(componentState.actionMessage()).toBe('Recording is ready in Playback.');
+    expect(componentState.timelineItems()[0].file_path).toBe('harborlink://dvr/recording-1');
+    expect(componentState.timelineItems()[0].optimistic_key).toBeUndefined();
     discardPeriodicTasks();
   }));
 

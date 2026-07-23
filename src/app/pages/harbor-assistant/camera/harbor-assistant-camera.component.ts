@@ -52,7 +52,7 @@ interface HarborAssistantSearchPromptSuggestion {
   matchers?: string[];
 }
 
-type HarborAssistantSearchLocalMediaStatus = 'archiving' | 'archive_failed' | 'finalizing';
+type HarborAssistantSearchLocalMediaStatus = 'archiving' | 'archive_failed' | 'finalizing' | 'finalize_failed';
 type HarborAssistantSearchRecordIntent = 'starting' | 'finalizing';
 type HarborAssistantLiveStreamProfile = 'sub' | 'main';
 type HarborAssistantLiveTransport = 'hls' | 'webrtc';
@@ -200,6 +200,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private cameraRefreshRetryQueued = false;
   private actionMessageToken = 0;
   private liveFeedbackToken = 0;
+  private recordingFinalizationAttempts = 0;
+  private recordingFinalizationTimer: number | null = null;
   private hlsAttachToken = 0;
   private hlsPlaybackToken = 0;
   private hlsWarmToken = 0;
@@ -208,8 +210,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsWarmSession: HarborAssistantCameraLiveSessionResponse | null = null;
   private hlsWarmStartRequest: HarborAssistantHlsWarmStartRequest | null = null;
   private hlsRecoveryAttempts = 0;
+  private hlsStartingAssetRetryCount = 0;
+  private hlsStartingAssetRetryTimer: number | null = null;
   private webrtcAttachToken = 0;
+  private webrtcFirstFrameDeadlineTimer: number | null = null;
   private webrtcMediaStream: MediaStream | null = null;
+  private webrtcNegotiationAbortController: AbortController | null = null;
   private webrtcPlayRequestPending = false;
   private webrtcPlayRetryTimer: number | null = null;
   private webrtcPlaybackPending = false;
@@ -256,12 +262,18 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly hlsPrewarmMaxWaitMs = 60_000;
   private readonly hlsPlaylistPollIntervalMs = 500;
   private readonly hlsPlaylistMaxWaitMs = 90_000;
+  private readonly hlsStartingAssetRetryDelayMs = 1_000;
+  private readonly hlsStartingAssetRetryLimit = 5;
   private readonly liveSessionRenewIntervalMs = 120_000;
   private readonly liveSessionTtlSeconds = 300;
+  private readonly webRtcFirstFrameDeadlineMs = 10_000;
+  private readonly webRtcNegotiationDeadlineMs = 12_000;
   private readonly webRtcPlayAbortRetryLimit = 2;
   private readonly webRtcPlayRetryDelayMs = 100;
   private readonly liveTransitionFallbackRevealDelayMs = 250;
   private readonly liveTransitionPaintDelayMs = 32;
+  private readonly recordingFinalizationPollDelayMs = 1_000;
+  private readonly recordingFinalizationPollLimit = 8;
 
   ngOnInit(): void {
     this.refreshCameraDvr();
@@ -637,6 +649,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     this.actionBusy.set('record');
+    this.clearRecordingFinalizationTimer();
+    this.recordingFinalizationAttempts = 0;
     this.recordIntent.set('finalizing');
     this.actionError.set(null);
     this.showActionMessage('Finalizing recording...', 2200);
@@ -652,14 +666,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         this.dvrStatuses.set(response.statuses ?? []);
         this.showActionMessage('Recording stopped. Preparing playable clips...');
         this.refreshCameraDvr();
-        timer(1200).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
-          this.refreshCameraDvr();
-          if (this.recordIntent() === 'finalizing') {
-            this.recordIntent.set(null);
-          }
-        });
       },
       error: (error: unknown) => {
+        this.clearRecordingFinalizationTimer();
         this.recordIntent.set(null);
         this.removeOptimisticRecordings(deviceId);
         this.actionError.set(harborAssistantSearchErrorMessage(error));
@@ -1167,6 +1176,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       && this.webrtcPeerConnection
     ) {
       this.liveControlPlaybackMode.set('webrtc');
+      this.clearWebRtcFirstFrameDeadline();
       this.webrtcPlaybackPending = false;
       this.webrtcPauseTimelineSeconds = null;
       this.resetLivePlaybackUserPause();
@@ -1629,6 +1639,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.clearRecordingFinalizationTimer();
     this.stopHlsPlayback();
     this.stopLive(false);
     this.stopHlsWarmSession();
@@ -1719,6 +1730,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (segment.local_status === 'archive_failed') {
       return 'Archive failed';
     }
+    if (segment.local_status === 'finalize_failed') {
+      return 'Recording unavailable';
+    }
     return this.canOpenMediaItem(segment) ? 'Playable' : 'Not playable';
   }
 
@@ -1731,7 +1745,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   isArchiveFailed(segment: HarborAssistantSearchMediaItem): boolean {
-    return segment.local_status === 'archive_failed';
+    return segment.local_status === 'archive_failed' || segment.local_status === 'finalize_failed';
   }
 
   formatUnix(value: string | number | undefined | null): string {
@@ -2033,14 +2047,17 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }));
   }
 
-  private pruneFinalizingRecordings(deviceId: string, segments: HarborAssistantSearchDvrTimelineSegment[]): void {
+  private pruneFinalizingRecordings(
+    deviceId: string,
+    segments: HarborAssistantSearchDvrTimelineSegment[],
+  ): boolean {
     const pendingRecordings = this.optimisticMediaItems().filter((segment) => {
       return segment.device_id === deviceId
         && this.mediaKind(segment) === 'recording'
         && segment.local_status === 'finalizing';
     });
     if (pendingRecordings.length === 0) {
-      return;
+      return true;
     }
     const playableRecordingExists = segments.some((segment) => {
       const matchesPendingWindow = pendingRecordings.some((pending) => {
@@ -2054,6 +2071,41 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (playableRecordingExists) {
       this.removeOptimisticRecordings(deviceId);
     }
+    return playableRecordingExists;
+  }
+
+  private scheduleRecordingFinalizationRefresh(deviceId: string): void {
+    this.clearRecordingFinalizationTimer();
+    if (this.recordingFinalizationAttempts >= this.recordingFinalizationPollLimit) {
+      this.optimisticMediaItems.set(this.optimisticMediaItems().map((segment) => {
+        if (
+          segment.device_id !== deviceId
+          || this.mediaKind(segment) !== 'recording'
+          || segment.local_status !== 'finalizing'
+        ) {
+          return segment;
+        }
+        return { ...segment, local_status: 'finalize_failed' };
+      }));
+      this.recordIntent.set(null);
+      this.actionError.set('Recording stopped, but the saved clip did not appear in Playback.');
+      return;
+    }
+    this.recordingFinalizationAttempts += 1;
+    this.recordingFinalizationTimer = this.window.setTimeout(() => {
+      this.recordingFinalizationTimer = null;
+      if (this.recordIntent() === 'finalizing' && this.selectedCameraId() === deviceId) {
+        this.refreshCameraDvr();
+      }
+    }, this.recordingFinalizationPollDelayMs);
+  }
+
+  private clearRecordingFinalizationTimer(): void {
+    if (this.recordingFinalizationTimer === null) {
+      return;
+    }
+    this.window.clearTimeout(this.recordingFinalizationTimer);
+    this.recordingFinalizationTimer = null;
   }
 
   private uniqueMediaItems(segments: HarborAssistantSearchMediaItem[]): HarborAssistantSearchMediaItem[] {
@@ -2121,7 +2173,16 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       next: (timeline) => {
         const segments = this.normalizeTimelineSegmentsForDisplay(deviceId, timeline.segments ?? []);
         this.dvrTimeline.set(segments);
-        this.pruneFinalizingRecordings(deviceId, segments);
+        const recordingFinalized = this.pruneFinalizingRecordings(deviceId, segments);
+        if (this.recordIntent() === 'finalizing') {
+          if (recordingFinalized) {
+            this.clearRecordingFinalizationTimer();
+            this.recordIntent.set(null);
+            this.showActionMessage('Recording is ready in Playback.');
+          } else {
+            this.scheduleRecordingFinalizationRefresh(deviceId);
+          }
+        }
         this.cameraError.set(refreshErrors.length > 0 ? refreshErrors[0] : null);
       },
       error: (error: unknown) => {
@@ -2313,9 +2374,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         }
         return;
       }
-      this.attachWhepPlayback(video, url, token).catch(() => {
+      this.attachWhepPlayback(video, url, token).catch((error: unknown) => {
         if (this.webrtcAttachToken === token) {
-          this.fallbackToHlsPlayback('WebRTC connection failed.');
+          this.fallbackToHlsPlayback(this.webRtcNegotiationFailureMessage(error));
         }
       });
     }, attempt === 0 ? 0 : 100);
@@ -2324,10 +2385,15 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private async attachWhepPlayback(video: HTMLVideoElement, url: string, token: number): Promise<void> {
     const peerConnection = new RTCPeerConnection({ iceServers: [] });
     this.webrtcPeerConnection?.close();
+    this.abortWebRtcNegotiation();
+    this.clearWebRtcFirstFrameDeadline();
     this.clearWebRtcPlayRetry();
     this.webrtcMediaStream = null;
     this.webrtcPlayRequestPending = false;
     this.webrtcPeerConnection = peerConnection;
+    const abortController = new AbortController();
+    this.webrtcNegotiationAbortController = abortController;
+    let negotiatedResourceUrl: string | null = null;
     peerConnection.addTransceiver('video', { direction: 'recvonly' });
     peerConnection.addTransceiver('audio', { direction: 'recvonly' });
     peerConnection.ontrack = (event) => {
@@ -2362,31 +2428,121 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       }
     };
 
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    await this.waitForIceGathering(peerConnection);
-    if (this.webrtcAttachToken !== token || !peerConnection.localDescription?.sdp) {
-      peerConnection.close();
-      return;
-    }
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/sdp' },
-      body: peerConnection.localDescription.sdp,
-    });
-    if (!response.ok) {
-      throw new Error(`WHEP negotiation failed with HTTP ${response.status}`);
-    }
-    const answer = await response.text();
-    const location = response.headers.get('Location');
-    const negotiatedResourceUrl = location ? new URL(location, this.window.location.href).toString() : null;
-    if (this.webrtcAttachToken !== token) {
+    const negotiation = async (): Promise<void> => {
+      const offer = await peerConnection.createOffer();
+      this.ensureWebRtcNegotiationIsActive(peerConnection, token, abortController.signal);
+      await peerConnection.setLocalDescription(offer);
+      await this.waitForIceGathering(peerConnection);
+      this.ensureWebRtcNegotiationIsActive(peerConnection, token, abortController.signal);
+      const offerSdp = peerConnection.localDescription?.sdp;
+      if (!offerSdp) {
+        throw new Error('WebRTC offer did not contain SDP');
+      }
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offerSdp,
+        signal: abortController.signal,
+      });
+      this.ensureWebRtcNegotiationIsActive(peerConnection, token, abortController.signal);
+      if (!response.ok) {
+        throw new Error(`WHEP negotiation failed with HTTP ${response.status}`);
+      }
+      negotiatedResourceUrl = this.validateWhepResourceUrl(response.headers.get('Location'));
+      const answer = await response.text();
+      this.ensureWebRtcNegotiationIsActive(peerConnection, token, abortController.signal);
+      await peerConnection.setRemoteDescription({ type: 'answer', sdp: answer });
+      this.ensureWebRtcNegotiationIsActive(peerConnection, token, abortController.signal);
+    };
+
+    try {
+      await this.runWebRtcNegotiationWithDeadline(negotiation(), abortController);
+      this.webrtcResourceUrl = negotiatedResourceUrl;
+      this.scheduleWebRtcFirstFrameDeadline(peerConnection, token);
+    } catch (error: unknown) {
+      if (this.webrtcPeerConnection === peerConnection) {
+        this.webrtcPeerConnection = null;
+      }
+      peerConnection.ontrack = null;
+      peerConnection.onconnectionstatechange = null;
       peerConnection.close();
       this.deleteWhepResource(negotiatedResourceUrl);
+      throw error;
+    } finally {
+      if (this.webrtcNegotiationAbortController === abortController) {
+        this.webrtcNegotiationAbortController = null;
+      }
+    }
+  }
+
+  private runWebRtcNegotiationWithDeadline(
+    negotiation: Promise<void>,
+    abortController: AbortController,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const deadline = this.window.setTimeout(() => {
+        abortController.abort();
+        reject(new Error('WebRTC negotiation timed out'));
+      }, this.webRtcNegotiationDeadlineMs);
+      negotiation.then(resolve, reject).finally(() => this.window.clearTimeout(deadline));
+    });
+  }
+
+  private ensureWebRtcNegotiationIsActive(
+    peerConnection: RTCPeerConnection,
+    token: number,
+    abortSignal: AbortSignal,
+  ): void {
+    if (
+      abortSignal.aborted
+      || this.webrtcAttachToken !== token
+      || this.webrtcPeerConnection !== peerConnection
+    ) {
+      throw new Error('WebRTC negotiation was cancelled');
+    }
+  }
+
+  private validateWhepResourceUrl(location: string | null): string {
+    if (!location) {
+      throw new Error('WHEP response did not include a Location header');
+    }
+    const resourceUrl = new URL(location, this.window.location.href);
+    const currentUrl = new URL(this.window.location.href);
+    if (
+      resourceUrl.origin !== currentUrl.origin
+      || !resourceUrl.pathname.startsWith('/api/harbor-link/media/')
+    ) {
+      throw new Error('WHEP resource Location is outside the allowed HarborLink media path');
+    }
+    resourceUrl.hash = '';
+    return resourceUrl.toString();
+  }
+
+  private scheduleWebRtcFirstFrameDeadline(peerConnection: RTCPeerConnection, token: number): void {
+    this.clearWebRtcFirstFrameDeadline();
+    this.webrtcFirstFrameDeadlineTimer = this.window.setTimeout(() => {
+      this.webrtcFirstFrameDeadlineTimer = null;
+      if (
+        this.webrtcAttachToken === token
+        && this.webrtcPeerConnection === peerConnection
+        && this.liveControlPlaybackMode() !== 'webrtc'
+      ) {
+        this.fallbackToHlsPlayback('WebRTC did not render a first frame in time.');
+      }
+    }, this.webRtcFirstFrameDeadlineMs);
+  }
+
+  private clearWebRtcFirstFrameDeadline(): void {
+    if (this.webrtcFirstFrameDeadlineTimer === null) {
       return;
     }
-    this.webrtcResourceUrl = negotiatedResourceUrl;
-    await peerConnection.setRemoteDescription({ type: 'answer', sdp: answer });
+    this.window.clearTimeout(this.webrtcFirstFrameDeadlineTimer);
+    this.webrtcFirstFrameDeadlineTimer = null;
+  }
+
+  private abortWebRtcNegotiation(): void {
+    this.webrtcNegotiationAbortController?.abort();
+    this.webrtcNegotiationAbortController = null;
   }
 
   private attachWebRtcTrack(video: HTMLVideoElement, event: RTCTrackEvent): void {
@@ -2446,6 +2602,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     return 'WebRTC playback failed.';
   }
 
+  private webRtcNegotiationFailureMessage(error: unknown): string {
+    if (error instanceof Error && error.message.includes('timed out')) {
+      return 'WebRTC connection timed out.';
+    }
+    return 'WebRTC connection failed.';
+  }
+
   private waitForIceGathering(peerConnection: RTCPeerConnection): Promise<void> {
     if (peerConnection.iceGatheringState === 'complete') {
       return Promise.resolve();
@@ -2492,6 +2655,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private stopWebRtcPlayback(clearUrl = true): void {
     this.webrtcAttachToken += 1;
+    this.abortWebRtcNegotiation();
+    this.clearWebRtcFirstFrameDeadline();
     this.clearWebRtcPlayRetry();
     this.webrtcMediaStream = null;
     this.webrtcPlayRequestPending = false;
@@ -2532,8 +2697,14 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   private deleteWhepResource(resourceUrl: string | null): void {
-    if (resourceUrl && typeof fetch !== 'undefined') {
-      fetch(resourceUrl, { method: 'DELETE', keepalive: true }).catch((): void => undefined);
+    if (!resourceUrl || typeof fetch === 'undefined') {
+      return;
+    }
+    try {
+      const validatedResourceUrl = this.validateWhepResourceUrl(resourceUrl);
+      fetch(validatedResourceUrl, { method: 'DELETE', keepalive: true }).catch((): void => undefined);
+    } catch {
+      // Ignore unsafe or malformed resource URLs; they must never receive a browser request.
     }
   }
 
@@ -2676,6 +2847,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
           return;
         }
         if (this.isExpiredHlsAssetError(data)) {
+          if (this.retryStartingHlsAsset(hls, data)) {
+            return;
+          }
           this.hlsLiveStatus.set('degraded');
           this.hlsLiveError.set('Live session expired. Start live playback again.');
           this.stopHlsPlayback();
@@ -2743,6 +2917,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       this.hlsFirstFrameSeen = true;
       this.showLiveFeedback('Live started.', 1800);
     }
+    this.clearHlsStartingAssetRetry();
     this.hlsLiveStatus.set('live');
     this.hlsLiveError.set(null);
   }
@@ -2779,6 +2954,43 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     const code = (response as { code?: unknown }).code;
     return code === 404 || code === 410;
+  }
+
+  private retryStartingHlsAsset(
+    hls: Hls,
+    data: { details?: unknown; response?: unknown; type?: unknown },
+  ): boolean {
+    if (
+      this.hlsLiveStatus() !== 'starting'
+      || this.hlsStartingAssetRetryCount >= this.hlsStartingAssetRetryLimit
+    ) {
+      return false;
+    }
+    this.hlsStartingAssetRetryCount += 1;
+    this.hlsLiveError.set(
+      `Live HLS assets are starting; retrying ${this.hlsStartingAssetRetryCount}/${this.hlsStartingAssetRetryLimit} (${this.describeHlsError(data)}).`,
+    );
+    this.clearHlsStartingAssetRetryTimer();
+    this.hlsStartingAssetRetryTimer = this.window.setTimeout(() => {
+      this.hlsStartingAssetRetryTimer = null;
+      if (this.hls === hls && this.hlsLiveStatus() === 'starting') {
+        hls.startLoad();
+      }
+    }, this.hlsStartingAssetRetryDelayMs);
+    return true;
+  }
+
+  private clearHlsStartingAssetRetry(): void {
+    this.clearHlsStartingAssetRetryTimer();
+    this.hlsStartingAssetRetryCount = 0;
+  }
+
+  private clearHlsStartingAssetRetryTimer(): void {
+    if (this.hlsStartingAssetRetryTimer === null) {
+      return;
+    }
+    this.window.clearTimeout(this.hlsStartingAssetRetryTimer);
+    this.hlsStartingAssetRetryTimer = null;
   }
 
   private describeHlsError(data: { details?: unknown; error?: unknown; type?: unknown }): string {
@@ -2878,6 +3090,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private stopHlsPlayback(): void {
     this.stopLiveEdgeMonitor();
+    this.clearHlsStartingAssetRetry();
     if (this.hls) {
       this.hls.destroy();
       this.hls = null;
