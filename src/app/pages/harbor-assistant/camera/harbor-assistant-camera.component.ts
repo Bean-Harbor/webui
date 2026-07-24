@@ -11,16 +11,18 @@ import { MatTab, MatTabGroup } from '@angular/material/tabs';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
 import Hls from 'hls.js';
 import { forkJoin, fromEvent, Observable, of, timer } from 'rxjs';
-import { catchError, finalize, shareReplay, switchMap, tap } from 'rxjs/operators';
+import { catchError, finalize, retry, shareReplay, switchMap, tap } from 'rxjs/operators';
 import { WINDOW } from 'app/helpers/window.helper';
 import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
 import {
   buildHarborAssistantSearchPayload,
   buildHarborAssistantSearchWaterfallItems,
+  harborAssistantHlsLiveUrl,
   harborAssistantSearchErrorMessage,
   harborAssistantSearchHasNoResults,
   harborAssistantSearchSameOriginAdminUrl,
+  harborAssistantWhepUrl,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
 import {
   HarborTimeRangeDialogComponent,
@@ -213,6 +215,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private hlsStartingAssetRetryCount = 0;
   private hlsStartingAssetRetryTimer: number | null = null;
   private webrtcAttachToken = 0;
+  private webrtcFirstFrameCallbackId: number | null = null;
+  private webrtcFirstFrameCallbackVideo: (HTMLVideoElement & HarborAssistantVideoFrameCallbacks) | null = null;
   private webrtcFirstFrameDeadlineTimer: number | null = null;
   private webrtcMediaStream: MediaStream | null = null;
   private webrtcNegotiationAbortController: AbortController | null = null;
@@ -220,6 +224,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private webrtcPlayRetryTimer: number | null = null;
   private webrtcPlaybackPending = false;
   private webrtcPeerConnection: RTCPeerConnection | null = null;
+  private webrtcPostDispatched = false;
   private webrtcResourceUrl: string | null = null;
   private webrtcDegradedSessionId: string | null = null;
   private webrtcPauseTimelineSeconds: number | null = null;
@@ -1162,6 +1167,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   onLiveVideoLoadedData(): void {
+    const video = this.liveVideo?.nativeElement;
+    if (video?.srcObject && video.srcObject === this.webrtcMediaStream) {
+      this.waitForWebRtcDecodedFrame(video, this.webrtcAttachToken);
+      return;
+    }
     this.syncLiveControlState();
     this.markHlsPlaybackReady();
     this.resumeLivePlayback();
@@ -1175,12 +1185,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       && video.srcObject === this.webrtcMediaStream
       && this.webrtcPeerConnection
     ) {
-      this.liveControlPlaybackMode.set('webrtc');
-      this.clearWebRtcFirstFrameDeadline();
-      this.webrtcPlaybackPending = false;
-      this.webrtcPauseTimelineSeconds = null;
-      this.resetLivePlaybackUserPause();
-      this.startLiveEdgeMonitor();
+      this.waitForWebRtcDecodedFrame(video, this.webrtcAttachToken);
+      return;
     }
     this.livePlaybackHasPlayed = true;
     this.livePlaybackBackgroundPaused = false;
@@ -2320,10 +2326,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private rememberLivePlaybackUrls(session: HarborAssistantCameraLiveSessionResponse): void {
     if (session.playlist_url) {
-      this.hlsLiveUrl.set(harborAssistantSearchSameOriginAdminUrl(session.playlist_url));
+      this.hlsLiveUrl.set(harborAssistantHlsLiveUrl(session.playlist_url));
     }
     if (session.webrtc_status === 'ready' && session.webrtc_url) {
-      this.webrtcLiveUrl.set(harborAssistantSearchSameOriginAdminUrl(session.webrtc_url));
+      this.webrtcLiveUrl.set(harborAssistantWhepUrl(session.webrtc_url));
     }
   }
 
@@ -2337,7 +2343,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     ) {
       return false;
     }
-    const url = harborAssistantSearchSameOriginAdminUrl(session.webrtc_url);
+    const url = harborAssistantWhepUrl(session.webrtc_url);
     if (!url) {
       return false;
     }
@@ -2390,6 +2396,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.clearWebRtcPlayRetry();
     this.webrtcMediaStream = null;
     this.webrtcPlayRequestPending = false;
+    this.webrtcPostDispatched = false;
     this.webrtcPeerConnection = peerConnection;
     const abortController = new AbortController();
     this.webrtcNegotiationAbortController = abortController;
@@ -2438,6 +2445,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       if (!offerSdp) {
         throw new Error('WebRTC offer did not contain SDP');
       }
+      this.webrtcPostDispatched = true;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
@@ -2510,7 +2518,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const currentUrl = new URL(this.window.location.href);
     if (
       resourceUrl.origin !== currentUrl.origin
-      || !resourceUrl.pathname.startsWith('/api/harbor-link/media/')
+      || !/^\/api\/harbor-link\/media\/[^/]+\/whep\/[^/]+$/.test(resourceUrl.pathname)
+      || resourceUrl.search
     ) {
       throw new Error('WHEP resource Location is outside the allowed HarborLink media path');
     }
@@ -2530,6 +2539,64 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         this.fallbackToHlsPlayback('WebRTC did not render a first frame in time.');
       }
     }, this.webRtcFirstFrameDeadlineMs);
+  }
+
+  private waitForWebRtcDecodedFrame(video: HTMLVideoElement, token: number): void {
+    if (
+      this.webrtcAttachToken !== token
+      || video.srcObject !== this.webrtcMediaStream
+      || !this.webrtcPeerConnection
+    ) {
+      return;
+    }
+    const frameVideo = video as HTMLVideoElement & HarborAssistantVideoFrameCallbacks;
+    if (frameVideo.requestVideoFrameCallback) {
+      if (this.webrtcFirstFrameCallbackVideo === frameVideo && this.webrtcFirstFrameCallbackId !== null) {
+        return;
+      }
+      this.clearWebRtcFirstFrameCallback();
+      this.webrtcFirstFrameCallbackVideo = frameVideo;
+      this.webrtcFirstFrameCallbackId = frameVideo.requestVideoFrameCallback(() => {
+        this.webrtcFirstFrameCallbackId = null;
+        this.webrtcFirstFrameCallbackVideo = null;
+        this.markWebRtcDecodedFrame(video, token);
+      });
+      return;
+    }
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      this.markWebRtcDecodedFrame(video, token);
+    }
+  }
+
+  private markWebRtcDecodedFrame(video: HTMLVideoElement, token: number): void {
+    if (
+      this.webrtcAttachToken !== token
+      || video.srcObject !== this.webrtcMediaStream
+      || !this.webrtcPeerConnection
+    ) {
+      return;
+    }
+    this.clearWebRtcFirstFrameCallback();
+    this.clearWebRtcFirstFrameDeadline();
+    this.liveControlPlaybackMode.set('webrtc');
+    this.hlsLiveStatus.set('live');
+    this.webrtcPlaybackPending = false;
+    this.webrtcPauseTimelineSeconds = null;
+    this.resetLivePlaybackUserPause();
+    this.livePlaybackHasPlayed = true;
+    this.livePlaybackBackgroundPaused = false;
+    this.startLiveControlTimeline();
+    this.syncLiveControlState();
+    this.scheduleLiveTransportFrameReveal();
+    this.startLiveEdgeMonitor();
+  }
+
+  private clearWebRtcFirstFrameCallback(): void {
+    if (this.webrtcFirstFrameCallbackId !== null) {
+      this.webrtcFirstFrameCallbackVideo?.cancelVideoFrameCallback?.(this.webrtcFirstFrameCallbackId);
+    }
+    this.webrtcFirstFrameCallbackId = null;
+    this.webrtcFirstFrameCallbackVideo = null;
   }
 
   private clearWebRtcFirstFrameDeadline(): void {
@@ -2637,6 +2704,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private fallbackToHlsPlayback(message: string): void {
     const session = this.hlsLiveSession();
+    const requiresRemoteSessionCleanup = Boolean(
+      this.webrtcPostDispatched
+      && !this.webrtcResourceUrl
+      && session?.device_id
+      && session.session_id,
+    );
     if (session?.session_id) {
       this.webrtcDegradedSessionId = session.session_id;
     }
@@ -2646,6 +2719,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.stopWebRtcPlayback(false);
     this.liveControlPlaybackMode.set('hls-fallback');
     this.hlsLiveError.set(`${message} HLS fallback is active.`);
+    if (requiresRemoteSessionCleanup && session) {
+      this.restartLiveSessionForHlsFallback(session);
+      this.showLiveFeedback('WebRTC unavailable. Using HLS.', 2200);
+      return;
+    }
     if (session?.playlist_url && this.shouldAttachHlsPlayback(session)) {
       this.startHlsPlaybackFromSession(session, { pending: !session.playlist_ready });
       this.scheduleLiveTransportFrameReveal();
@@ -2653,9 +2731,57 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.showLiveFeedback('WebRTC unavailable. Using HLS.', 2200);
   }
 
+  private restartLiveSessionForHlsFallback(session: HarborAssistantCameraLiveSessionResponse): void {
+    const deviceId = session.device_id;
+    const sessionId = session.session_id;
+    if (!deviceId || !sessionId) {
+      return;
+    }
+    const streamProfile = this.normalizeLiveStreamProfile(session.stream_profile);
+    this.clearLiveSessionRenewTimer();
+    this.hlsLiveStatus.set('starting');
+    this.api.stopCameraLiveSession(deviceId, sessionId).pipe(
+      retry({
+        count: 3,
+        delay: (_error, retryCount) => timer(retryCount * 500),
+      }),
+      catchError(() => of(null)),
+      switchMap(() => this.api.startCameraLiveSession(deviceId, streamProfile)),
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (fallbackSession) => {
+        if (
+          this.hlsLiveStatus() === 'stopped'
+          || this.hlsLiveSession()?.session_id !== sessionId
+        ) {
+          this.releaseHlsWarmSession(fallbackSession);
+          return;
+        }
+        this.applySessionStreamProfile(fallbackSession);
+        this.hlsLiveSession.set(fallbackSession);
+        this.webrtcDegradedSessionId = fallbackSession.session_id;
+        this.rememberLivePlaybackUrls(fallbackSession);
+        this.scheduleLiveSessionRenewal(fallbackSession);
+        const attached = this.shouldAttachHlsPlayback(fallbackSession)
+          && this.startHlsPlaybackFromSession(fallbackSession, { pending: !fallbackSession.playlist_ready });
+        if (!fallbackSession.playlist_ready || !attached) {
+          this.waitForHlsPlaylist(fallbackSession);
+        }
+      },
+      error: (error: unknown) => {
+        if (this.hlsLiveSession()?.session_id !== sessionId) {
+          return;
+        }
+        this.hlsLiveStatus.set('degraded');
+        this.hlsLiveError.set(harborAssistantSearchErrorMessage(error));
+      },
+    });
+  }
+
   private stopWebRtcPlayback(clearUrl = true): void {
     this.webrtcAttachToken += 1;
     this.abortWebRtcNegotiation();
+    this.clearWebRtcFirstFrameCallback();
     this.clearWebRtcFirstFrameDeadline();
     this.clearWebRtcPlayRetry();
     this.webrtcMediaStream = null;
@@ -2663,6 +2789,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.webrtcPlaybackPending = false;
     const peerConnection = this.webrtcPeerConnection;
     this.webrtcPeerConnection = null;
+    this.webrtcPostDispatched = false;
     if (peerConnection) {
       peerConnection.ontrack = null;
       peerConnection.onconnectionstatechange = null;
@@ -2767,7 +2894,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return false;
     }
 
-    const liveUrl = harborAssistantSearchSameOriginAdminUrl(session.playlist_url);
+    const liveUrl = harborAssistantHlsLiveUrl(session.playlist_url);
     const shouldAttach = this.hlsLiveUrl() !== liveUrl || this.hls === null;
     this.hlsLiveUrl.set(liveUrl);
     if (shouldAttach) {

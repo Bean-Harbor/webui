@@ -176,7 +176,15 @@ describe('Harbor Assistant camera component', () => {
       writable: true,
     });
     spectator = createComponent();
-    const video = fakeLiveVideo({ srcObject: null, volume: 1 });
+    let decodedFrame: (() => void) | null = null;
+    const video = fakeLiveVideo({
+      requestVideoFrameCallback: (callback) => {
+        decodedFrame = callback;
+        return 1;
+      },
+      srcObject: null,
+      volume: 1,
+    });
     const componentState = spectator.component as unknown as {
       attachWhepPlayback: (video: HTMLVideoElement, url: string, token: number) => Promise<void>;
       liveControlPlaybackMode: () => string;
@@ -205,6 +213,9 @@ describe('Harbor Assistant camera component', () => {
       expect(componentState.liveControlPlaybackMode()).toBe('hls-fallback');
 
       spectator.component.onLiveVideoPlaying();
+
+      expect(componentState.liveControlPlaybackMode()).toBe('hls-fallback');
+      decodedFrame?.();
 
       expect(componentState.liveControlPlaybackMode()).toBe('webrtc');
     } finally {
@@ -361,6 +372,12 @@ describe('Harbor Assistant camera component', () => {
     )).toThrow('outside the allowed HarborLink media path');
     expect(() => componentState.validateWhepResourceUrl(
       '/api/harbor-beacon/media/harbor-live-test/whep/session-1',
+    )).toThrow('outside the allowed HarborLink media path');
+    expect(() => componentState.validateWhepResourceUrl(
+      '/api/harbor-link/media/harbor-live-test/not-whep/session-1',
+    )).toThrow('outside the allowed HarborLink media path');
+    expect(() => componentState.validateWhepResourceUrl(
+      '/api/harbor-link/media/harbor-live-test/whep/session-1?redirect=1',
     )).toThrow('outside the allowed HarborLink media path');
     expect(() => componentState.validateWhepResourceUrl(null)).toThrow('Location header');
     discardPeriodicTasks();
@@ -564,6 +581,61 @@ describe('Harbor Assistant camera component', () => {
       });
     }
   });
+
+  it('replaces the Link live session when WHEP is cancelled before Location arrives', fakeAsync(() => {
+    spectator = createComponent();
+    const oldSession = liveSession({ session_id: 'live-whep-pending' });
+    const fallbackSession = liveSession({
+      session_id: 'live-hls-fallback',
+      webrtc_status: 'ready',
+      webrtc_url: '/api/harbor-link/media/live-hls-fallback/whep',
+    });
+    api.startCameraLiveSession = jest.fn(() => of(fallbackSession));
+    const componentState = spectator.component as unknown as {
+      fallbackToHlsPlayback: (message: string) => void;
+      hlsLiveSession: {
+        set: (value: HarborAssistantCameraLiveSessionResponse) => void;
+      } & (() => HarborAssistantCameraLiveSessionResponse | null);
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      startHlsPlaybackFromSession: jest.Mock;
+      webrtcPostDispatched: boolean;
+      webrtcResourceUrl: string | null;
+    };
+    componentState.hlsLiveSession.set(oldSession);
+    componentState.hlsLiveStatus.set('starting');
+    componentState.startHlsPlaybackFromSession = jest.fn(() => true);
+    componentState.webrtcPostDispatched = true;
+    componentState.webrtcResourceUrl = null;
+
+    componentState.fallbackToHlsPlayback('WebRTC connection timed out.');
+
+    expect(api.stopCameraLiveSession).toHaveBeenCalledWith('cam-1', 'live-whep-pending');
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'sub');
+    expect(componentState.hlsLiveSession()?.session_id).toBe('live-hls-fallback');
+    expect(componentState.startHlsPlaybackFromSession).toHaveBeenCalledWith(
+      fallbackSession,
+      { pending: false },
+    );
+    discardPeriodicTasks();
+  }));
+
+  it('requests Link live-session cleanup when the component unmounts during WHEP negotiation', fakeAsync(() => {
+    spectator = createComponent();
+    const session = liveSession({ session_id: 'live-unmount-pending' });
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      webrtcPostDispatched: boolean;
+    };
+    componentState.hlsLiveSession.set(session);
+    componentState.hlsLiveStatus.set('starting');
+    componentState.webrtcPostDispatched = true;
+
+    spectator.component.ngOnDestroy();
+
+    expect(api.stopCameraLiveSession).toHaveBeenCalledWith('cam-1', 'live-unmount-pending');
+    discardPeriodicTasks();
+  }));
 
   it('keeps the frozen frame until the target transport presents its first frame', fakeAsync(() => {
     spectator = createComponent();

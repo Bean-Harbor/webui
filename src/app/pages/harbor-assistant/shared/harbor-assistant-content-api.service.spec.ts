@@ -179,6 +179,8 @@ describe('Harbor Assistant content API service', () => {
     );
     expect(liveReq.request.method).toBe('POST');
     expect(liveReq.request.body).toEqual({ stream_profile: 'main' });
+    const liveStartRequestId = liveReq.request.headers.get('X-Request-Id');
+    expect(liveStartRequestId).toMatch(/^webui:live-start:camera-main:/);
     liveReq.flush({
       device_id: 'camera-main',
       session_id: 'live-main',
@@ -202,6 +204,9 @@ describe('Harbor Assistant content API service', () => {
       session_id: 'live-main',
       ttl_seconds: 300,
     });
+    const liveRenewRequestId = renewReq.request.headers.get('X-Request-Id');
+    expect(liveRenewRequestId).toMatch(/^webui:live-renew:camera-main:live-main:/);
+    expect(liveRenewRequestId).not.toBe(liveStartRequestId);
     renewReq.flush({
       device_id: 'camera-main',
       session_id: 'live-main',
@@ -221,6 +226,32 @@ describe('Harbor Assistant content API service', () => {
       .expectOne('/api/harbor-beacon/cameras/camera-main/snapshot')
       .flush({ task_id: 'task-1' });
     expect(await snapshotPromise).toEqual({ task_id: 'task-1' });
+  });
+
+  it('keeps the business request ID stable when a mutation request is resubscribed', async () => {
+    const stopRequest$ = spectator.service.stopCameraLiveSession('camera-main', 'live-main');
+    const response = {
+      device_id: 'camera-main',
+      session_id: 'live-main',
+      status: 'stopped',
+      playlist_ready: false,
+      mode: 'harborlink_media',
+      codec: 'h264',
+      stream_profile: 'main',
+      updated_at: '6',
+    };
+
+    const firstPromise = firstValueFrom(stopRequest$);
+    const firstRequest = httpMock.expectOne('/api/harbor-beacon/cameras/camera-main/live/stop');
+    const firstRequestId = firstRequest.request.headers.get('X-Request-Id');
+    firstRequest.flush(response);
+    await firstPromise;
+
+    const secondPromise = firstValueFrom(stopRequest$);
+    const secondRequest = httpMock.expectOne('/api/harbor-beacon/cameras/camera-main/live/stop');
+    expect(secondRequest.request.headers.get('X-Request-Id')).toBe(firstRequestId);
+    secondRequest.flush(response);
+    await secondPromise;
   });
 
   it('uses same-origin Harbor Assistant proxy paths and avoids direct service ports', () => {

@@ -17,6 +17,8 @@ import {
 @Injectable({ providedIn: 'root' })
 export class HarborAssistantContentApiService {
   private readonly http = inject(HttpClient);
+  private readonly requestIdSeed = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  private requestSequence = 0;
 
   private apiUrl(path: string): string {
     return harborAssistantBeaconApiUrl(path);
@@ -71,6 +73,7 @@ export class HarborAssistantContentApiService {
     return this.http.post<HarborAssistantSearchDvrStatusResponse>(
       this.apiUrl(`/cameras/${encodeURIComponent(deviceId)}/recordings/start`),
       { stream_profile: streamProfile },
+      this.mutationOptions('recording-start', deviceId),
     );
   }
 
@@ -80,6 +83,7 @@ export class HarborAssistantContentApiService {
     return this.http.post<HarborAssistantSearchDvrStatusResponse>(
       this.apiUrl(`/cameras/${encodeURIComponent(deviceId)}/recordings/stop`),
       {},
+      this.mutationOptions('recording-stop', deviceId),
     );
   }
 
@@ -90,6 +94,7 @@ export class HarborAssistantContentApiService {
     return this.http.post<HarborAssistantCameraLiveSessionResponse>(
       this.apiUrl(`/cameras/${encodeURIComponent(deviceId)}/live/start`),
       { stream_profile: streamProfile },
+      this.mutationOptions('live-start', deviceId),
     );
   }
 
@@ -100,6 +105,7 @@ export class HarborAssistantContentApiService {
     return this.http.post<HarborAssistantCameraLiveSessionResponse>(
       this.apiUrl(`/cameras/${encodeURIComponent(deviceId)}/live/stop`),
       sessionId ? { session_id: sessionId } : {},
+      this.mutationOptions('live-stop', `${deviceId}:${sessionId ?? 'current'}`),
     );
   }
 
@@ -111,6 +117,7 @@ export class HarborAssistantContentApiService {
     return this.http.post<HarborAssistantCameraLiveSessionResponse>(
       this.apiUrl(`/cameras/${encodeURIComponent(deviceId)}/live/renew`),
       { session_id: sessionId, ttl_seconds: ttlSeconds },
+      this.mutationOptions('live-renew', `${deviceId}:${sessionId}`),
     );
   }
 
@@ -140,7 +147,17 @@ export class HarborAssistantContentApiService {
     return this.http.post<HarborAssistantSearchSnapshotTaskResponse>(
       this.apiUrl(`/cameras/${encodeURIComponent(deviceId)}/snapshot`),
       {},
+      this.mutationOptions('snapshot', deviceId),
     );
+  }
+
+  private mutationOptions(operation: string, entity: string): { headers: Record<string, string> } {
+    this.requestSequence += 1;
+    return {
+      headers: {
+        'X-Request-Id': `webui:${operation}:${entity}:${this.requestIdSeed}:${this.requestSequence}`,
+      },
+    };
   }
 
   previewUrl(path: string): string {
