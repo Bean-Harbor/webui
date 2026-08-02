@@ -156,9 +156,14 @@ describe('Harbor Assistant search result helpers', () => {
         },
       ],
       documents: [
-        { modality: 'document', path: '/mnt/note.md', title: 'Note', score: 77 },
         {
-          modality: 'audio', path: '/mnt/speech.flac', title: 'Speech', score: 88,
+          modality: 'document', path: '/mnt/note.md', title: 'Note', score: 77,
+        },
+        {
+          modality: 'audio',
+          path: '/mnt/speech.flac',
+          title: 'Speech',
+          score: 88,
         },
       ],
       videos: [

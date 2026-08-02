@@ -851,15 +851,15 @@ export interface HardwareReadinessComponent {
   evidence?: string[];
 }
 
-export type ModelCapabilityStatusValue =
-  | 'ready'
-  | 'needs_model'
-  | 'needs_runtime'
-  | 'downloading'
-  | 'installed_not_running'
-  | 'degraded'
-  | 'unsupported'
-  | string;
+export type ModelCapabilityStatusValue
+  = | 'ready'
+    | 'needs_model'
+    | 'needs_runtime'
+    | 'downloading'
+    | 'installed_not_running'
+    | 'degraded'
+    | 'unsupported'
+    | (string & Record<never, never>);
 
 export interface ModelCapabilityCurrentModel {
   model_endpoint_id: string;

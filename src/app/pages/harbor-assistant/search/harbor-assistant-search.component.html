@@ -209,25 +209,25 @@
                       @for (item of waterfallItems(result, turn.filter); track resultTrackKey($index, item)) {
                         <mat-card
                           class="reference-card"
-                          [ngClass]="item.kind"
                           tabindex="0"
+                          [ngClass]="item.kind"
                           (click)="openPreview(item)"
                           (keydown.enter)="openPreview(item)"
                         >
                           @if (item.kind === 'image') {
                             <div class="image-frame">
-                              <img [src]="item.previewUrl" [alt]="item.hit.title" loading="lazy" />
+                              <img loading="lazy" [src]="item.previewUrl" [alt]="item.hit.title" />
                             </div>
                           }
                           @if (item.kind === 'video') {
                             <div class="video-frame">
-                              <video [src]="videoPreviewUrl(item)" muted playsinline preload="metadata" aria-hidden="true"></video>
+                              <video muted playsinline preload="metadata" aria-hidden="true" [src]="videoPreviewUrl(item)"></video>
                               <span class="play-chip">{{ 'Play' | translate }}</span>
                             </div>
                           }
                           @if (item.kind === 'audio') {
                             <div class="audio-frame" (click)="$event.stopPropagation()">
-                              <audio [src]="item.previewUrl" controls preload="metadata"></audio>
+                              <audio controls preload="metadata" [src]="item.previewUrl"></audio>
                             </div>
                           }
                           <mat-card-content>

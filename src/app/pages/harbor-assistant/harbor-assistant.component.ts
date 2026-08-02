@@ -9,8 +9,8 @@ import { MatDialog } from '@angular/material/dialog';
 import { MatDivider } from '@angular/material/divider';
 import { MatFormField, MatLabel, MatSuffix } from '@angular/material/form-field';
 import { MatInput } from '@angular/material/input';
-import { MatOption, MatSelect } from '@angular/material/select';
 import { MatProgressBar } from '@angular/material/progress-bar';
+import { MatOption, MatSelect } from '@angular/material/select';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { marker as T } from '@biesbjerg/ngx-translate-extract-marker';
 import { TranslateModule } from '@ngx-translate/core';
@@ -95,6 +95,12 @@ import { HarborAssistantSearchComponent } from 'app/pages/harbor-assistant/searc
 import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 import { HarborAssistantApiService } from 'app/pages/harbor-assistant/services/harbor-assistant-api.service';
 import { harborGateConnectorManageUrl, harborGateConnectorSetupUrl } from 'app/pages/harbor-assistant/utils/harborgate-urls';
+
+// New identity fields remain authoritative; these aliases only support older Beacon payloads.
+interface LegacyModelCapabilityStatusFields {
+  selected_model_id?: string | null;
+  runtime_model_id?: string | null;
+}
 
 interface HarborAssistantPageData {
   state: EndpointResult<AdminStateResponse>;
@@ -394,6 +400,7 @@ export class HarborAssistantComponent implements OnInit {
       return job.status === 'queued' || job.status === 'running';
     }) ?? null;
   });
+
   protected readonly knowledgeIndexing = computed(() => this.activeKnowledgeIndexJob() !== null);
   protected readonly dvrSettings = signal<DvrRecordingSettings | null>(null);
   protected readonly dvrStatus = signal<DvrRecordingStatusResponse | null>(null);
@@ -2249,7 +2256,7 @@ export class HarborAssistantComponent implements OnInit {
 
   protected workflowCurrentModelName(kind: string): string {
     const capability = this.workflowCapabilityForKind(kind);
-    const activeModelId = capability?.active_model_id?.trim() || capability?.runtime_model_id?.trim();
+    const activeModelId = this.modelCapabilityActiveModelId(capability);
     if (activeModelId) {
       const active = [
         ...(capability.installed_models ?? []),
@@ -2284,7 +2291,7 @@ export class HarborAssistantComponent implements OnInit {
 
   private workflowRuntimeModelIdentity(kind: string): string | null {
     const capability = this.workflowCapabilityForKind(kind);
-    const runtimeModel = capability?.active_model_id?.trim() || capability?.runtime_model_id?.trim();
+    const runtimeModel = this.modelCapabilityActiveModelId(capability);
     return runtimeModel?.toLowerCase() || null;
   }
 
@@ -3002,7 +3009,7 @@ export class HarborAssistantComponent implements OnInit {
       model.model_id,
       model.local_path ?? catalogModel?.local_path ?? null,
     );
-    const selected = capability?.selected_model_id === model.model_id;
+    const selected = this.modelCapabilityDesiredModelId(capability) === model.model_id;
     const isCurrent = runtimeActive;
     const runtimeProfiles = model.runtime_profiles ?? catalogModel?.runtime_profiles ?? [];
     let action: CustomerModelAction = 'download';
@@ -3275,6 +3282,30 @@ export class HarborAssistantComponent implements OnInit {
     }) ?? null;
   }
 
+  private modelCapabilityDesiredModelId(
+    capability: ModelCapabilityStatus | null | undefined,
+  ): string | null {
+    if (!capability) {
+      return null;
+    }
+    if ('desired_model_id' in capability) {
+      return capability.desired_model_id?.trim() || null;
+    }
+    return (capability as LegacyModelCapabilityStatusFields).selected_model_id?.trim() || null;
+  }
+
+  private modelCapabilityActiveModelId(
+    capability: ModelCapabilityStatus | null | undefined,
+  ): string | null {
+    if (!capability) {
+      return null;
+    }
+    if ('active_model_id' in capability) {
+      return capability.active_model_id?.trim() || null;
+    }
+    return (capability as LegacyModelCapabilityStatusFields).runtime_model_id?.trim() || null;
+  }
+
   private modelCapabilityUserStatus(capability: ModelCapabilityStatus): string {
     switch (capability.status) {
       case 'ready':
@@ -3360,9 +3391,10 @@ export class HarborAssistantComponent implements OnInit {
     if (!capability) {
       return false;
     }
-    const runtimeModel = capability.active_model_id?.trim()
-      || capability.runtime_model_id?.trim()
-      || (capability.runtime_ready ? capability.current_model?.model_name?.trim() : '');
+    const runtimeModel = this.modelCapabilityActiveModelId(capability)
+      || (!('active_model_id' in capability) && capability.runtime_ready
+        ? capability.current_model?.model_name?.trim()
+        : '');
     if (!runtimeModel) {
       return false;
     }

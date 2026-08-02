@@ -542,7 +542,7 @@ describe('Harbor Assistant component', () => {
     expect(currentModelCells[3]).toHaveText('Uses the same running model as Question understanding');
   });
 
-  it('does not present configured model metadata as the running model', () => {
+  it('does not let legacy model metadata override an explicitly empty active model', () => {
     spectator = createComponent();
     const component = spectator.component as unknown as {
       modelCapabilitiesResponse: { set: (response: unknown) => void };
@@ -558,6 +558,8 @@ describe('Harbor Assistant component', () => {
         model_kind: 'vlm',
         status: 'degraded',
         desired_model_id: 'Qwen/Qwen3.5-9B',
+        active_model_id: null,
+        runtime_model_id: 'legacy-configured-model',
         transition_status: 'unknown',
         current_model: {
           model_endpoint_id: 'vlm-local-openai-compatible',
@@ -891,11 +893,11 @@ describe('Harbor Assistant component', () => {
     spectator.detectChanges();
 
     const component = spectator.component as unknown as {
-      workflowModelChoices: (kind: string) => Array<{
+      workflowModelChoices: (kind: string) => {
         modelId: string;
         action: string;
         actionLabel: string;
-      }>;
+      }[];
     };
     const choices = component.workflowModelChoices('embedder');
 
@@ -905,7 +907,7 @@ describe('Harbor Assistant component', () => {
     ]);
     expect(choices.find((card) => card.modelId === qwen.model_id)).toMatchObject({
       action: 'set-current',
-      actionLabel: 'Select',
+      actionLabel: 'Restart',
     });
     expect(choices.find((card) => card.modelId === jina.model_id)).toMatchObject({
       action: 'current',
