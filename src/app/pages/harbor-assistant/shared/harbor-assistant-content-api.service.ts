@@ -1,10 +1,21 @@
 import { HttpClient } from '@angular/common/http';
-import { Injectable, inject } from '@angular/core';
-import { Observable } from 'rxjs';
-import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
+import { Injectable, Injector, inject } from '@angular/core';
+import { Observable, defer, map, switchMap } from 'rxjs';
+import { AuthService } from 'app/modules/auth/auth.service';
+import {
+  harborAssistantBeaconApiUrl,
+  harborAssistantGateApiUrl,
+  harborAssistantGateRequiresUserToken,
+} from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 import { harborAssistantPreviewUrl } from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantConversationDetail,
+  HarborAssistantConversationListResponse,
+  HarborAssistantConversationSettings,
+  HarborAssistantKnowledgeAnswerResponse,
+  HarborAssistantKnowledgeSuggestionsResponse,
+  HarborAssistantRetrievalSettings,
   HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
   HarborAssistantSearchDvrStatusResponse,
@@ -12,11 +23,17 @@ import {
   HarborAssistantSearchRequest,
   HarborAssistantSearchResponse,
   HarborAssistantSearchSnapshotTaskResponse,
+  HarborAssistantSearchWireResponse,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
+
+interface HarborAssistantAuthenticatedRequestOptions {
+  headers?: Record<'X-HarborOS-Auth-Token', string>;
+}
 
 @Injectable({ providedIn: 'root' })
 export class HarborAssistantContentApiService {
   private readonly http = inject(HttpClient);
+  private readonly injector = inject(Injector);
   private readonly requestIdSeed = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   private requestSequence = 0;
 
@@ -24,12 +41,65 @@ export class HarborAssistantContentApiService {
     return harborAssistantBeaconApiUrl(path);
   }
 
-  search(
-    payload: HarborAssistantSearchRequest,
-  ): Observable<HarborAssistantSearchResponse> {
-    return this.http.post<HarborAssistantSearchResponse>(
-      this.apiUrl('/knowledge/search'),
+  private gateApiUrl(path: string): string {
+    return harborAssistantGateApiUrl(path);
+  }
+
+  search(payload: HarborAssistantSearchRequest): Observable<HarborAssistantSearchResponse> {
+    return this.withUserToken((options) => this.http.post<HarborAssistantSearchWireResponse>(
+      this.gateApiUrl('/knowledge/search'),
       payload,
+      options,
+    )).pipe(
+      map((response) => normalizeHarborAssistantSearchResponse(response, payload.conversation_id)),
+    );
+  }
+
+  suggestions(): Observable<HarborAssistantKnowledgeSuggestionsResponse> {
+    return this.http.get<HarborAssistantKnowledgeSuggestionsResponse>(
+      this.apiUrl('/knowledge/suggestions'),
+    );
+  }
+
+  conversations(): Observable<HarborAssistantConversationListResponse> {
+    return this.withUserToken((options) => this.http.get<HarborAssistantConversationListResponse>(
+      this.gateApiUrl('/knowledge/conversations'),
+      options,
+    ));
+  }
+
+  conversation(conversationId: string): Observable<HarborAssistantConversationDetail> {
+    return this.withUserToken((options) => this.http.get<HarborAssistantConversationDetail>(
+      this.gateApiUrl(`/knowledge/conversations/${encodeURIComponent(conversationId)}`),
+      options,
+    ));
+  }
+
+  deleteConversation(conversationId: string): Observable<{ deleted: boolean; conversation_id: string }> {
+    return this.withUserToken((options) => this.http.delete<{ deleted: boolean; conversation_id: string }>(
+      this.gateApiUrl(`/knowledge/conversations/${encodeURIComponent(conversationId)}`),
+      options,
+    ));
+  }
+
+  saveConversationSettings(
+    settings: HarborAssistantConversationSettings,
+  ): Observable<HarborAssistantConversationSettings> {
+    return this.withUserToken((options) => this.http.patch<HarborAssistantConversationSettings>(
+      this.gateApiUrl('/knowledge/conversation-settings'),
+      settings,
+      options,
+    ));
+  }
+
+  retrievalSettings(): Observable<HarborAssistantRetrievalSettings> {
+    return this.http.get<HarborAssistantRetrievalSettings>(this.apiUrl('/knowledge/retrieval-settings'));
+  }
+
+  saveRetrievalSettings(settings: HarborAssistantRetrievalSettings): Observable<HarborAssistantRetrievalSettings> {
+    return this.http.patch<HarborAssistantRetrievalSettings>(
+      this.apiUrl('/knowledge/retrieval-settings'),
+      settings,
     );
   }
 
@@ -163,4 +233,103 @@ export class HarborAssistantContentApiService {
   previewUrl(path: string): string {
     return harborAssistantPreviewUrl(path);
   }
+
+  private withUserToken<T>(
+    request: (options: HarborAssistantAuthenticatedRequestOptions) => Observable<T>,
+  ): Observable<T> {
+    return defer(() => {
+      if (!harborAssistantGateRequiresUserToken()) {
+        return request({});
+      }
+      return this.injector.get(AuthService).getHarborAssistantOneTimeToken().pipe(
+        switchMap((token) => request({
+          headers: { 'X-HarborOS-Auth-Token': token },
+        })),
+      );
+    });
+  }
+}
+
+export function normalizeHarborAssistantSearchResponse(
+  response: unknown,
+  conversationId?: string,
+): HarborAssistantSearchResponse {
+  if (isHarborAssistantSearchResponse(response)) {
+    return response;
+  }
+  if (!isHarborAssistantKnowledgeAnswerResponse(response)) {
+    throw new Error('Harbor Assistant returned an unsupported search response.');
+  }
+
+  const degraded = response.degraded || response.search.degraded;
+  const degradedReason = response.degraded_reason ?? response.search.degraded_reason ?? null;
+
+  return {
+    ...response.search,
+    conversation_id: response.conversation_id ?? conversationId,
+    answer: response.answer,
+    degraded,
+    degraded_reason: degradedReason,
+    answer_degraded: degraded,
+    answer_degraded_reason: degradedReason,
+    answer_intent: response.query_understanding?.intent ?? null,
+    review_scope: response.review_scope ?? response.search.review_scope ?? null,
+    reply_pack: {
+      ...response.search.reply_pack,
+      summary: response.answer,
+      citations: response.citations,
+    },
+    warnings: stableUnique([...response.search.warnings, ...response.warnings]),
+  };
+}
+
+function isHarborAssistantKnowledgeAnswerResponse(
+  response: unknown,
+): response is HarborAssistantKnowledgeAnswerResponse {
+  if (!isRecord(response)) {
+    return false;
+  }
+  return response.kind === 'rag.answer'
+    && typeof response.query === 'string'
+    && typeof response.answer === 'string'
+    && typeof response.status === 'string'
+    && typeof response.degraded === 'boolean'
+    && Array.isArray(response.citations)
+    && isStringArray(response.warnings)
+    && isHarborAssistantSearchResponse(response.search);
+}
+
+function isHarborAssistantSearchResponse(response: unknown): response is HarborAssistantSearchResponse {
+  if (!isRecord(response) || !isRecord(response.reply_pack)) {
+    return false;
+  }
+  return typeof response.query === 'string'
+    && Array.isArray(response.roots)
+    && typeof response.total_matches === 'number'
+    && Array.isArray(response.documents)
+    && Array.isArray(response.images)
+    && Array.isArray(response.videos)
+    && typeof response.reply_pack.summary === 'string'
+    && Array.isArray(response.reply_pack.citations)
+    && Array.isArray(response.supported_modalities)
+    && Array.isArray(response.pending_modalities)
+    && typeof response.status === 'string'
+    && typeof response.degraded === 'boolean'
+    && isStringArray(response.blockers)
+    && isStringArray(response.warnings)
+    && Array.isArray(response.source_scope)
+    && typeof response.privacy_level === 'string'
+    && typeof response.resource_profile === 'string';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function stableUnique(values: string[]): string[] {
+  return values.filter((value, index) => values.indexOf(value) === index);
 }

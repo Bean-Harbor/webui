@@ -1,16 +1,39 @@
-export type HarborAssistantSearchResultFilter = 'all' | 'images' | 'text' | 'videos';
+export type HarborAssistantSearchResultFilter = 'all' | 'audio' | 'images' | 'text' | 'videos';
 export type HarborAssistantSearchSourceScope = 'dvr_library' | 'nas_files' | 'all';
+export type HarborAssistantRetrievalMode = 'auto' | 'on' | 'off';
 
 export interface HarborAssistantSearchRequest {
   query: string;
+  conversation_id?: string;
   limit?: number;
   include_documents: boolean;
+  include_audio: boolean;
   include_images: boolean;
   include_videos: boolean;
+  use_retrieval?: boolean;
+  retrieval_mode?: HarborAssistantRetrievalMode;
   source_scope?: HarborAssistantSearchSourceScope;
+  source_root_ids?: string[];
   camera_id?: string | null;
   from?: string | null;
   to?: string | null;
+}
+
+export interface HarborAssistantRetrievalSettings {
+  query_expansion_enabled: boolean;
+  fusion_strategy: string;
+  rrf_k: number;
+  lexical_weight: number;
+  vector_weight: number;
+  candidate_limit: number;
+  lexical_min_score: number;
+  vector_min_score: number;
+  semantic_only_min_score: number;
+  rerank_enabled: boolean;
+  rerank_top_k: number;
+  rerank_min_score: number;
+  mmr_enabled: boolean;
+  mmr_lambda: number;
 }
 
 export interface HarborAssistantSearchHit {
@@ -40,6 +63,7 @@ export interface HarborAssistantSearchReplyPack {
 }
 
 export interface HarborAssistantSearchResponse {
+  conversation_id?: string;
   query: string;
   roots: string[];
   total_matches: number;
@@ -59,10 +83,90 @@ export interface HarborAssistantSearchResponse {
   resource_profile: string;
   empty_reason?: string | null;
   empty_guidance?: string | null;
+  answer?: string | null;
+  answer_degraded?: boolean;
+  answer_degraded_reason?: string | null;
+  answer_intent?: string | null;
+  review_scope?: HarborAssistantReviewScope | null;
+}
+
+export interface HarborAssistantReviewScope {
+  returned_count: number;
+  reviewed_count: number;
+  max_reviewed_count: number;
+  note?: string | null;
+}
+
+export interface HarborAssistantQueryUnderstanding {
+  intent: string;
+  needs_retrieval: boolean;
+  target_modalities?: ('audio' | 'document' | 'image' | 'video')[];
+  retrieval_strategy?: 'semantic' | 'recent';
+}
+
+export interface HarborAssistantKnowledgeAnswerResponse {
+  kind: 'rag.answer';
+  conversation_id?: string;
+  status: string;
+  degraded: boolean;
+  degraded_reason?: string | null;
+  query: string;
+  answer: string;
+  citations: unknown[];
+  search: HarborAssistantSearchResponse;
+  review_scope?: HarborAssistantReviewScope | null;
+  warnings: string[];
+  query_understanding?: HarborAssistantQueryUnderstanding | null;
+}
+
+export type HarborAssistantSearchWireResponse
+  = | HarborAssistantKnowledgeAnswerResponse
+    | HarborAssistantSearchResponse;
+
+export interface HarborAssistantKnowledgeSuggestion {
+  subject: string;
+  kind: 'describe' | 'summarize';
+  filter: HarborAssistantSearchResultFilter;
+}
+
+export interface HarborAssistantKnowledgeSuggestionsResponse {
+  generated_at: string;
+  suggestions: HarborAssistantKnowledgeSuggestion[];
+}
+
+export interface HarborAssistantConversationSettings {
+  history_limit: number;
+  context_turn_limit: number;
+  context_token_limit: number;
+}
+
+export interface HarborAssistantConversationSummary {
+  conversation_id: string;
+  title: string;
+  updated_at?: string | null;
+  turn_count: number;
+}
+
+export interface HarborAssistantConversationTurn {
+  task_id: string;
+  query: string;
+  answer: string;
+  created_at?: string | null;
+  response: HarborAssistantKnowledgeAnswerResponse;
+}
+
+export interface HarborAssistantConversationDetail {
+  conversation_id: string;
+  turns: HarborAssistantConversationTurn[];
+}
+
+export interface HarborAssistantConversationListResponse {
+  conversations: HarborAssistantConversationSummary[];
+  settings?: HarborAssistantConversationSettings | null;
 }
 
 export interface HarborAssistantSearchWaterfallItem {
-  kind: 'image' | 'document' | 'video';
+  kind: 'audio' | 'image' | 'document' | 'video';
   hit: HarborAssistantSearchHit;
   previewUrl: string;
 }

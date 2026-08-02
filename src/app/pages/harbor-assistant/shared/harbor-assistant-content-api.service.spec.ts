@@ -5,9 +5,14 @@ import {
   HttpTestingController,
   provideHttpClientTesting,
 } from '@angular/common/http/testing';
-import { SpectatorService, createServiceFactory } from '@ngneat/spectator/jest';
-import { firstValueFrom } from 'rxjs';
+import { SpectatorService, createServiceFactory, mockProvider } from '@ngneat/spectator/jest';
+import { firstValueFrom, of } from 'rxjs';
+import { AuthService } from 'app/modules/auth/auth.service';
 import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
+import {
+  HarborAssistantSearchRequest,
+  HarborAssistantSearchResponse,
+} from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
 
 describe('Harbor Assistant content API service', () => {
   let spectator: SpectatorService<HarborAssistantContentApiService>;
@@ -15,7 +20,13 @@ describe('Harbor Assistant content API service', () => {
 
   const createService = createServiceFactory({
     service: HarborAssistantContentApiService,
-    providers: [provideHttpClient(), provideHttpClientTesting()],
+    providers: [
+      provideHttpClient(),
+      provideHttpClientTesting(),
+      mockProvider(AuthService, {
+        getHarborAssistantOneTimeToken: jest.fn(() => of('harbor-user-token')),
+      }),
+    ],
   });
 
   beforeEach(() => {
@@ -27,34 +38,64 @@ describe('Harbor Assistant content API service', () => {
     httpMock.verify();
   });
 
-  it('posts searches to the same-origin Harbor Assistant knowledge endpoint', async () => {
-    const promise = firstValueFrom(
-      spectator.service.search({
-        query: '找到和春天相关的照片',
-        limit: 24,
-        include_documents: true,
-        include_images: true,
-        include_videos: true,
-      }),
-    );
+  it('loads prompt suggestions derived from the current knowledge index', async () => {
+    const promise = firstValueFrom(spectator.service.suggestions());
 
-    const req = httpMock.expectOne('/api/harbor-beacon/knowledge/search');
+    const req = httpMock.expectOne('/api/harbor-beacon/knowledge/suggestions');
+    expect(req.request.method).toBe('GET');
+    expect(spectator.inject(AuthService).getHarborAssistantOneTimeToken).not.toHaveBeenCalled();
+    req.flush({
+      generated_at: '1722060000',
+      suggestions: [
+        { subject: '家庭旅行计划.md', kind: 'summarize', filter: 'text' },
+      ],
+    });
+
+    await expect(promise).resolves.toEqual({
+      generated_at: '1722060000',
+      suggestions: [
+        { subject: '家庭旅行计划.md', kind: 'summarize', filter: 'text' },
+      ],
+    });
+  });
+
+  it('posts questions to the same-origin Harbor Assistant search endpoint', async () => {
+    const promise = firstValueFrom(spectator.service.search({
+      query: '找到和春天相关的照片',
+      limit: 24,
+      include_documents: true,
+      include_audio: true,
+      include_images: true,
+      include_videos: true,
+    }));
+
+    const req = httpMock.expectOne('/api/harbor-gate/api/beacon/knowledge/search');
     expect(req.request.method).toBe('POST');
+    expect(req.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
     expect(req.request.body).toEqual({
       query: '找到和春天相关的照片',
       limit: 24,
       include_documents: true,
+      include_audio: true,
       include_images: true,
       include_videos: true,
     });
     expect(req.request.url).not.toContain(':4174');
     req.flush({
+      kind: 'rag.answer',
       query: '找到和春天相关的照片',
-      roots: [],
-      total_matches: 1,
-      documents: [],
-      images: [
-        {
+      answer: '照片中有春天的花朵。[1]',
+      citations: [{ title: 'neutral-001.jpg' }],
+      status: 'completed',
+      degraded: false,
+      warnings: [],
+      query_understanding: { intent: 'search', needs_retrieval: true },
+      search: {
+        query: '找到和春天相关的照片',
+        roots: [],
+        total_matches: 1,
+        documents: [],
+        images: [{
           modality: 'image',
           path: '/mnt/software/photos/neutral-001.jpg',
           title: 'neutral-001.jpg',
@@ -63,25 +104,96 @@ describe('Harbor Assistant content API service', () => {
           content_indexed: true,
           filename_match_used: false,
           content_match_used: true,
-        },
-      ],
-      videos: [],
-      reply_pack: { summary: '', citations: [] },
-      supported_modalities: ['document', 'image', 'video'],
-      pending_modalities: [],
-      status: 'ok',
-      degraded: false,
-      blockers: [],
-      warnings: [],
-      source_scope: [],
-      privacy_level: 'strict_local',
-      resource_profile: 'cpu_only',
+        }],
+        videos: [],
+        reply_pack: { summary: '', citations: [] },
+        supported_modalities: ['document', 'image', 'video'],
+        pending_modalities: [],
+        status: 'ok',
+        degraded: false,
+        blockers: [],
+        warnings: [],
+        source_scope: [],
+        privacy_level: 'strict_local',
+        resource_profile: 'cpu_only',
+      },
     });
 
     const response = await promise;
     expect(response.images[0].content_source_kinds).toEqual(['vlm']);
     expect(response.images[0].filename_match_used).toBe(false);
     expect(response.images[0].content_match_used).toBe(true);
+    expect(response.answer).toBe('照片中有春天的花朵。[1]');
+    expect(response.answer_intent).toBe('search');
+    expect(spectator.inject(AuthService).getHarborAssistantOneTimeToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes through a legacy flat response without retrying the POST', async () => {
+    const legacyResponse = searchResponse({ answer: 'Legacy answer' });
+    const promise = firstValueFrom(spectator.service.search(searchRequest('legacy')));
+
+    const requests = httpMock.match('/api/harbor-gate/api/beacon/knowledge/search');
+    expect(requests).toHaveLength(1);
+    requests[0].flush(legacyResponse);
+
+    await expect(promise).resolves.toBe(legacyResponse);
+    expect(spectator.inject(AuthService).getHarborAssistantOneTimeToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes a rag.answer envelope with envelope fields taking precedence', async () => {
+    const promise = firstValueFrom(spectator.service.search({
+      ...searchRequest('new response'),
+      conversation_id: 'requested-conversation',
+    }));
+    const req = httpMock.expectOne('/api/harbor-gate/api/beacon/knowledge/search');
+    req.flush({
+      kind: 'rag.answer',
+      conversation_id: 'server-conversation',
+      query: 'new response',
+      answer: 'Grounded answer',
+      citations: [{ path: '/indexed/a.md' }],
+      status: 'completed',
+      degraded: true,
+      degraded_reason: 'citation_validation_failed',
+      review_scope: { returned_count: 5, reviewed_count: 3, max_reviewed_count: 3 },
+      warnings: ['envelope warning', 'shared warning'],
+      query_understanding: { intent: 'search', needs_retrieval: true },
+      search: searchResponse({
+        status: 'partial',
+        degraded: false,
+        degraded_reason: 'search reason',
+        warnings: ['search warning', 'shared warning'],
+        review_scope: { returned_count: 5, reviewed_count: 2, max_reviewed_count: 2 },
+      }),
+    });
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      conversation_id: 'server-conversation',
+      status: 'partial',
+      answer: 'Grounded answer',
+      degraded: true,
+      degraded_reason: 'citation_validation_failed',
+      answer_degraded: true,
+      answer_degraded_reason: 'citation_validation_failed',
+      answer_intent: 'search',
+      review_scope: { returned_count: 5, reviewed_count: 3, max_reviewed_count: 3 },
+      reply_pack: {
+        summary: 'Grounded answer',
+        citations: [{ path: '/indexed/a.md' }],
+      },
+      warnings: ['search warning', 'shared warning', 'envelope warning'],
+    }));
+  });
+
+  it('fails once for an unsupported response without probing or retrying', async () => {
+    const promise = firstValueFrom(spectator.service.search(searchRequest('invalid')));
+    const requests = httpMock.match('/api/harbor-gate/api/beacon/knowledge/search');
+    expect(requests).toHaveLength(1);
+    requests[0].flush({ kind: 'unexpected' });
+
+    await expect(promise).rejects.toThrow('Harbor Assistant returned an unsupported search response.');
+    httpMock.expectNone('/api/harbor-beacon/knowledge/search');
+    expect(spectator.inject(AuthService).getHarborAssistantOneTimeToken).toHaveBeenCalledTimes(1);
   });
 
   it('builds encoded same-origin preview URLs', () => {
@@ -94,6 +206,45 @@ describe('Harbor Assistant content API service', () => {
     );
     expect(url).not.toContain(':4174');
     expect(url).not.toContain(':8787');
+  });
+
+  it('loads, deletes, and configures persistent conversation history', async () => {
+    const listPromise = firstValueFrom(spectator.service.conversations());
+    const listRequest = httpMock.expectOne('/api/harbor-gate/api/beacon/knowledge/conversations');
+    expect(listRequest.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
+    listRequest.flush({
+      conversations: [{ conversation_id: 'conv-1', title: '春天的文章', turn_count: 2 }],
+      settings: { history_limit: 10, context_turn_limit: 3, context_token_limit: 8192 },
+    });
+    expect((await listPromise).settings?.context_turn_limit).toBe(3);
+
+    const detailPromise = firstValueFrom(spectator.service.conversation('conv-1'));
+    const detailRequest = httpMock.expectOne('/api/harbor-gate/api/beacon/knowledge/conversations/conv-1');
+    expect(detailRequest.request.method).toBe('GET');
+    detailRequest.flush({ conversation_id: 'conv-1', turns: [] });
+    expect((await detailPromise).conversation_id).toBe('conv-1');
+
+    const savePromise = firstValueFrom(spectator.service.saveConversationSettings({
+      history_limit: 20,
+      context_turn_limit: 5,
+      context_token_limit: 8192,
+    }));
+    const saveRequest = httpMock.expectOne('/api/harbor-gate/api/beacon/knowledge/conversation-settings');
+    expect(saveRequest.request.method).toBe('PATCH');
+    expect(saveRequest.request.body).toEqual({
+      history_limit: 20,
+      context_turn_limit: 5,
+      context_token_limit: 8192,
+    });
+    saveRequest.flush({ history_limit: 20, context_turn_limit: 5, context_token_limit: 8192 });
+    expect((await savePromise).history_limit).toBe(20);
+
+    const deletePromise = firstValueFrom(spectator.service.deleteConversation('conv-1'));
+    const deleteRequest = httpMock.expectOne('/api/harbor-gate/api/beacon/knowledge/conversations/conv-1');
+    expect(deleteRequest.request.method).toBe('DELETE');
+    deleteRequest.flush({ deleted: true, conversation_id: 'conv-1' });
+    expect((await deletePromise).deleted).toBe(true);
+    expect(spectator.inject(AuthService).getHarborAssistantOneTimeToken).toHaveBeenCalledTimes(4);
   });
 
   it('reads camera DVR state from same-origin Harbor Assistant endpoints', async () => {
@@ -226,6 +377,7 @@ describe('Harbor Assistant content API service', () => {
       .expectOne('/api/harbor-beacon/cameras/camera-main/snapshot')
       .flush({ task_id: 'task-1' });
     expect(await snapshotPromise).toEqual({ task_id: 'task-1' });
+    expect(spectator.inject(AuthService).getHarborAssistantOneTimeToken).not.toHaveBeenCalled();
   });
 
   it('keeps the business request ID stable when a mutation request is resubscribed', async () => {
@@ -265,10 +417,9 @@ describe('Harbor Assistant content API service', () => {
       .join('\n');
 
     expect(sources).toContain('harborAssistantBeaconApiUrl');
-    expect(sources).toContain("this.apiUrl('/knowledge/search')");
-    expect(sources).toContain(
-      'harborAssistantBeaconApiUrl(`/knowledge/preview',
-    );
+    expect(sources).toContain("this.gateApiUrl('/knowledge/search')");
+    expect(sources).not.toContain("this.apiUrl('/knowledge/answer')");
+    expect(sources).toContain('harborAssistantBeaconApiUrl(`/knowledge/preview');
     expect(sources).toContain("this.apiUrl('/cameras/recordings/status')");
     expect(sources).toContain(
       ['this.apiUrl(`/cameras/$', '{encodeURIComponent(deviceId)}/recordings/start`)'].join(''),
@@ -289,4 +440,49 @@ describe('Harbor Assistant content API service', () => {
       expect(sources).not.toContain(forbidden);
     });
   });
+
+  it('keeps the HarborNavi build on its direct Beacon path without HarborOS token generation', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src/app/pages/harbor-assistant/services/harbor-assistant-api-prefix.harbornavi.ts'),
+      'utf8',
+    );
+
+    expect(source).toContain(['return `/api/beacon$', '{path}`'].join(''));
+    expect(source).toContain('harborAssistantGateRequiresUserToken');
+    expect(source).toContain('return false;');
+  });
 });
+
+function searchRequest(query: string): HarborAssistantSearchRequest {
+  return {
+    query,
+    include_documents: true,
+    include_audio: true,
+    include_images: true,
+    include_videos: true,
+  };
+}
+
+function searchResponse(partial: Partial<HarborAssistantSearchResponse> = {}): HarborAssistantSearchResponse {
+  return {
+    query: partial.query ?? 'query',
+    roots: [],
+    total_matches: partial.total_matches ?? 0,
+    documents: partial.documents ?? [],
+    images: partial.images ?? [],
+    videos: partial.videos ?? [],
+    reply_pack: partial.reply_pack ?? { summary: '', citations: [] },
+    supported_modalities: ['document', 'image', 'video'],
+    pending_modalities: [],
+    status: partial.status ?? 'ok',
+    degraded: partial.degraded ?? false,
+    degraded_reason: partial.degraded_reason,
+    blockers: partial.blockers ?? [],
+    warnings: partial.warnings ?? [],
+    source_scope: [],
+    privacy_level: 'strict_local',
+    resource_profile: 'cpu_only',
+    answer: partial.answer,
+    review_scope: partial.review_scope,
+  };
+}

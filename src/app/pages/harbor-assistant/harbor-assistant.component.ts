@@ -9,6 +9,7 @@ import { MatDialog } from '@angular/material/dialog';
 import { MatDivider } from '@angular/material/divider';
 import { MatFormField, MatLabel, MatSuffix } from '@angular/material/form-field';
 import { MatInput } from '@angular/material/input';
+import { MatProgressBar } from '@angular/material/progress-bar';
 import { MatOption, MatSelect } from '@angular/material/select';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { marker as T } from '@biesbjerg/ngx-translate-extract-marker';
@@ -62,6 +63,8 @@ import {
   HardwareReadinessComponent,
   HardwareReadinessResponse,
   InferenceHealthResponse,
+  KnowledgeIndexJobRecord,
+  KnowledgeIndexJobsResponse,
   KnowledgeIndexRootStatus,
   KnowledgeIndexStatusResponse,
   KnowledgeSettings,
@@ -92,6 +95,12 @@ import { HarborAssistantSearchComponent } from 'app/pages/harbor-assistant/searc
 import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 import { HarborAssistantApiService } from 'app/pages/harbor-assistant/services/harbor-assistant-api.service';
 import { harborGateConnectorManageUrl, harborGateConnectorSetupUrl } from 'app/pages/harbor-assistant/utils/harborgate-urls';
+
+// New identity fields remain authoritative; these aliases only support older Beacon payloads.
+interface LegacyModelCapabilityStatusFields {
+  selected_model_id?: string | null;
+  runtime_model_id?: string | null;
+}
 
 interface HarborAssistantPageData {
   state: EndpointResult<AdminStateResponse>;
@@ -225,7 +234,7 @@ interface RagSourceRootSummary {
 }
 
 type AiSettingsTabId = 'sources' | 'models' | 'cloud-api';
-type AssistantSettingsSectionId = 'ai' | 'camera';
+type AssistantSettingsSectionId = 'ai' | 'camera' | 'rules';
 type CloudUsageMode = 'local_only' | 'local_first_cloud' | 'selected_capabilities';
 type CloudCapabilityId = 'semantic_router' | 'retrieval_answer';
 
@@ -297,6 +306,9 @@ export const harborAssistantI18nMarkers = [
   selector: 'ix-harbor-assistant',
   templateUrl: './harbor-assistant.component.html',
   styleUrls: ['./harbor-assistant.component.scss'],
+  host: {
+    '[class.search-tab-active]': "isTab('search')",
+  },
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
     MatAnchor,
@@ -313,6 +325,7 @@ export const harborAssistantI18nMarkers = [
     MatLabel,
     MatSuffix,
     MatOption,
+    MatProgressBar,
     MatSelect,
     NgClass,
     HarborAssistantSearchComponent,
@@ -332,6 +345,7 @@ export class HarborAssistantComponent implements OnInit {
   private route = inject(ActivatedRoute);
   private router = inject(Router);
   private matDialog = inject(MatDialog);
+  private readonly knowledgeIndexPollInProgress = signal(false);
   private window = inject<Window>(WINDOW);
 
   protected readonly tabs: HarborAssistantTab[] = [
@@ -345,6 +359,7 @@ export class HarborAssistantComponent implements OnInit {
   protected readonly settingsSections: AssistantSettingsSection[] = [
     { id: 'ai', label: T('AI settings'), detail: '' },
     { id: 'camera', label: T('Camera settings'), detail: '' },
+    { id: 'rules', label: T('Automation rules'), detail: '' },
   ];
 
   protected readonly activeTab = signal<HarborAssistantTabId>('search');
@@ -379,6 +394,14 @@ export class HarborAssistantComponent implements OnInit {
   protected readonly rag = signal<RagReadinessResponse | null>(null);
   protected readonly knowledgeSettings = signal<KnowledgeSettings | null>(null);
   protected readonly knowledgeIndexStatus = signal<KnowledgeIndexStatusResponse | null>(null);
+  protected readonly knowledgeIndexJobs = signal<KnowledgeIndexJobsResponse | null>(null);
+  protected readonly activeKnowledgeIndexJob = computed<KnowledgeIndexJobRecord | null>(() => {
+    return this.knowledgeIndexJobs()?.jobs.find((job) => {
+      return job.status === 'queued' || job.status === 'running';
+    }) ?? null;
+  });
+
+  protected readonly knowledgeIndexing = computed(() => this.activeKnowledgeIndexJob() !== null);
   protected readonly dvrSettings = signal<DvrRecordingSettings | null>(null);
   protected readonly dvrStatus = signal<DvrRecordingStatusResponse | null>(null);
   protected readonly dvrTimeline = signal<DvrTimelineResponse | null>(null);
@@ -389,7 +412,6 @@ export class HarborAssistantComponent implements OnInit {
   protected readonly shareLinks = signal<ShareLinkSummary[]>([]);
   protected readonly automationReviews = signal<AutomationRuleReview[]>([]);
   protected readonly localVisionEvents = signal<StoredLocalVisionEvent[]>([]);
-  protected readonly rulesDrawerOpen = signal(false);
   protected readonly evidenceByDevice = signal<Record<string, DeviceEvidenceResponse>>({});
   protected readonly selectedDeviceId = signal<string>('');
   protected readonly pendingDeleteDeviceId = signal<string | null>(null);
@@ -736,9 +758,13 @@ export class HarborAssistantComponent implements OnInit {
       });
 
     this.loadData();
+    this.pollKnowledgeIndexJobs();
     timer(2000, 2000)
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => this.pollModelDownloadsIfNeeded());
+      .subscribe(() => {
+        this.pollModelDownloadsIfNeeded();
+        this.pollKnowledgeIndexJobs();
+      });
   }
 
   protected refresh(): void {
@@ -759,10 +785,6 @@ export class HarborAssistantComponent implements OnInit {
 
   protected isTab(tabId: HarborAssistantTabId): boolean {
     return this.activeTab() === tabId;
-  }
-
-  protected toggleRulesDrawer(): void {
-    this.rulesDrawerOpen.set(!this.rulesDrawerOpen());
   }
 
   protected saveRuleDraft(): void {
@@ -799,7 +821,6 @@ export class HarborAssistantComponent implements OnInit {
       next: (response) => {
         this.automationReviews.set(response.reviews ?? []);
         this.ruleDraftForm.reset();
-        this.rulesDrawerOpen.set(true);
         this.actionMessage.set(T('Rule draft is waiting for review.'));
       },
       error: (error: unknown) => this.actionError.set(this.getErrorMessage(error)),
@@ -1954,7 +1975,10 @@ export class HarborAssistantComponent implements OnInit {
       finalize(() => this.actionInProgress.set(null)),
       takeUntilDestroyed(this.destroyRef),
     ).subscribe({
-      next: () => this.actionMessage.set(T('Data source was added and indexing has started.')),
+      next: () => {
+        this.actionMessage.set(T('Data source was added and indexing has started.'));
+        this.pollKnowledgeIndexJobs();
+      },
       error: (error: unknown) => this.actionError.set(this.getErrorMessage(error)),
     });
   }
@@ -1991,9 +2015,27 @@ export class HarborAssistantComponent implements OnInit {
       finalize(() => this.actionInProgress.set(null)),
       takeUntilDestroyed(this.destroyRef),
     ).subscribe({
-      next: () => this.actionMessage.set(T('Knowledge index run completed.')),
+      next: () => {
+        this.actionMessage.set(T('Knowledge indexing has started.'));
+        this.pollKnowledgeIndexJobs();
+      },
       error: (error: unknown) => this.actionError.set(this.getErrorMessage(error)),
     });
+  }
+
+  protected knowledgeIndexProgress(job: KnowledgeIndexJobRecord): number {
+    return Math.min(100, Math.max(0, job.progress_percent ?? 0));
+  }
+
+  protected knowledgeIndexPhaseLabel(job: KnowledgeIndexJobRecord): string {
+    switch (job.checkpoint?.phase) {
+      case 'load_or_refresh':
+        return T('Scanning files and detecting changes');
+      case 'embedding_warmup':
+        return T('Generating missing vectors');
+      default:
+        return job.status === 'queued' ? T('Waiting to start') : T('Indexing knowledge files');
+    }
   }
 
   protected startKnowledgeSourceRoot(): void {
@@ -2214,20 +2256,16 @@ export class HarborAssistantComponent implements OnInit {
 
   protected workflowCurrentModelName(kind: string): string {
     const capability = this.workflowCapabilityForKind(kind);
-    if (capability?.selected_model_id) {
-      const selected = [
+    const activeModelId = this.modelCapabilityActiveModelId(capability);
+    if (activeModelId) {
+      const active = [
         ...(capability.installed_models ?? []),
         ...(capability.installable_models ?? []),
-      ].find((model) => model.model_id === capability.selected_model_id);
-      return selected?.display_name ?? capability.selected_model_id;
+      ].find((model) => model.model_id === activeModelId || model.local_path === activeModelId);
+      return active?.display_name ?? activeModelId;
     }
-    const runtimeModel = capability?.runtime_model_id?.trim();
-    if (runtimeModel) {
-      return runtimeModel;
-    }
-    const currentModelName = capability?.current_model?.model_name?.trim();
-    if (currentModelName) {
-      return currentModelName;
+    if (capability) {
+      return T('Unknown');
     }
     const current = this.currentModelCards().find((card) => card.kind === kind);
     if (!current?.endpoint || current.modelName === T('Not configured')) {
@@ -2236,9 +2274,40 @@ export class HarborAssistantComponent implements OnInit {
     return current.modelName;
   }
 
+  protected workflowSharedModelOwner(kind: string): AiModelCapability | null {
+    const runtimeIdentity = this.workflowRuntimeModelIdentity(kind);
+    if (!runtimeIdentity) {
+      return null;
+    }
+    const rows = this.aiModelCapabilities();
+    const currentIndex = rows.findIndex((row) => row.capabilityId === kind);
+    if (currentIndex <= 0) {
+      return null;
+    }
+    return rows.slice(0, currentIndex).find((row) => {
+      return this.workflowRuntimeModelIdentity(row.capabilityId) === runtimeIdentity;
+    }) ?? null;
+  }
+
+  private workflowRuntimeModelIdentity(kind: string): string | null {
+    const capability = this.workflowCapabilityForKind(kind);
+    const runtimeModel = this.modelCapabilityActiveModelId(capability);
+    return runtimeModel?.toLowerCase() || null;
+  }
+
   protected workflowCurrentModelDetail(kind: string): string {
     const capability = this.workflowCapabilityForKind(kind);
     if (capability) {
+      const desiredModelId = capability.desired_model_id?.trim();
+      if (capability.transition_status === 'loading' && desiredModelId) {
+        return `${T('Switching to')} ${desiredModelId}`;
+      }
+      if (capability.transition_status === 'mismatch' && desiredModelId) {
+        return `${T('Requested model')}: ${desiredModelId}. ${T('The current model is still serving requests.')}`;
+      }
+      if (capability.transition_status === 'failed') {
+        return capability.last_error || T('The requested model could not be activated.');
+      }
       return this.modelCapabilityUserStatus(capability);
     }
     const current = this.currentModelCards().find((card) => card.kind === kind);
@@ -2281,6 +2350,15 @@ export class HarborAssistantComponent implements OnInit {
   protected workflowCapabilityStatusLabel(kind: string): string {
     const capability = this.workflowCapabilityForKind(kind);
     if (capability) {
+      if (capability.transition_status === 'loading') {
+        return T('Switching');
+      }
+      if (capability.transition_status === 'mismatch') {
+        return T('Model mismatch');
+      }
+      if (capability.transition_status === 'failed') {
+        return T('Switch failed');
+      }
       return this.userStatusLabel(capability.status);
     }
     return this.workflowCurrentEndpoint(kind) ? T('Ready') : T('No model selected yet');
@@ -2348,13 +2426,32 @@ export class HarborAssistantComponent implements OnInit {
   private uniqueModelCards(cards: CustomerModelCard[]): CustomerModelCard[] {
     const seen = new Set<string>();
     return cards.filter((card) => {
-      const key = `${card.section}:${card.modelId}:${card.endpoint?.model_endpoint_id ?? ''}`;
-      if (seen.has(key)) {
+      const keys = this.modelCardIdentityKeys(card);
+      if (keys.some((key) => seen.has(key))) {
         return false;
       }
-      seen.add(key);
+      keys.forEach((key) => seen.add(key));
       return true;
     });
+  }
+
+  private modelCardIdentityKeys(card: CustomerModelCard): string[] {
+    const normalize = (value: string | null | undefined): string | null => {
+      const normalized = value?.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+      return normalized || null;
+    };
+    const modelId = normalize(card.modelId);
+    if (card.endpoint?.endpoint_kind === 'cloud') {
+      return [`cloud:${card.endpoint.model_endpoint_id}:${modelId ?? card.key.toLowerCase()}`];
+    }
+
+    const identities = [
+      modelId && `local:model:${modelId}`,
+      normalize(card.catalogModel?.repo_id) && `local:repo:${normalize(card.catalogModel?.repo_id)}`,
+      normalize(card.localPath) && `local:path:${normalize(card.localPath)}`,
+      normalize(card.catalogModel?.local_path) && `local:path:${normalize(card.catalogModel?.local_path)}`,
+    ].filter((value): value is string => Boolean(value));
+    return identities.length ? [...new Set(identities)] : [`local:key:${card.key.toLowerCase()}`];
   }
 
   private withCapabilityContext(card: CustomerModelCard, capabilityId: string): CustomerModelCard {
@@ -2781,6 +2878,15 @@ export class HarborAssistantComponent implements OnInit {
     return ['queued', 'running', 'downloading'].includes((job.status || '').toLowerCase());
   }
 
+  protected indexedKnowledgeFileCount(indexState: KnowledgeIndexStatusResponse): number {
+    return [
+      indexState.document_count,
+      indexState.image_count,
+      indexState.audio_count,
+      indexState.video_count,
+    ].reduce((total, count) => total + (count ?? 0), 0);
+  }
+
   private buildAiSettingsTabs(): AiSettingsTab[] {
     const sourceSummary = this.ragValidationSourceSummary();
     const indexState = this.knowledgeIndexStatus();
@@ -2903,7 +3009,7 @@ export class HarborAssistantComponent implements OnInit {
       model.model_id,
       model.local_path ?? catalogModel?.local_path ?? null,
     );
-    const selected = capability?.selected_model_id === model.model_id;
+    const selected = this.modelCapabilityDesiredModelId(capability) === model.model_id;
     const isCurrent = runtimeActive;
     const runtimeProfiles = model.runtime_profiles ?? catalogModel?.runtime_profiles ?? [];
     let action: CustomerModelAction = 'download';
@@ -3109,6 +3215,12 @@ export class HarborAssistantComponent implements OnInit {
   private modelCapabilityTone(kind: string): HarborAssistantStatusTone {
     const capability = this.workflowCapabilityForKind(kind);
     if (capability) {
+      if (capability.transition_status === 'failed') {
+        return 'danger';
+      }
+      if (capability.transition_status === 'loading' || capability.transition_status === 'mismatch') {
+        return 'warn';
+      }
       switch (capability.status) {
         case 'ready':
           return 'good';
@@ -3170,6 +3282,30 @@ export class HarborAssistantComponent implements OnInit {
     }) ?? null;
   }
 
+  private modelCapabilityDesiredModelId(
+    capability: ModelCapabilityStatus | null | undefined,
+  ): string | null {
+    if (!capability) {
+      return null;
+    }
+    if ('desired_model_id' in capability) {
+      return capability.desired_model_id?.trim() || null;
+    }
+    return (capability as LegacyModelCapabilityStatusFields).selected_model_id?.trim() || null;
+  }
+
+  private modelCapabilityActiveModelId(
+    capability: ModelCapabilityStatus | null | undefined,
+  ): string | null {
+    if (!capability) {
+      return null;
+    }
+    if ('active_model_id' in capability) {
+      return capability.active_model_id?.trim() || null;
+    }
+    return (capability as LegacyModelCapabilityStatusFields).runtime_model_id?.trim() || null;
+  }
+
   private modelCapabilityUserStatus(capability: ModelCapabilityStatus): string {
     switch (capability.status) {
       case 'ready':
@@ -3179,7 +3315,7 @@ export class HarborAssistantComponent implements OnInit {
       case 'needs_runtime':
         return capability.runtime_next_action || capability.next_action || T('Harbor-managed runtime is required');
       case 'installed_not_running':
-        return T('Model is installed and the local model service needs to start');
+        return capability.next_action || T('Model is installed and the local model service needs to start');
       case 'unsupported':
         return T('Not supported yet');
       case 'degraded':
@@ -3255,8 +3391,10 @@ export class HarborAssistantComponent implements OnInit {
     if (!capability) {
       return false;
     }
-    const runtimeModel = capability.runtime_model_id?.trim()
-      || (capability.runtime_ready ? capability.current_model?.model_name?.trim() : '');
+    const runtimeModel = this.modelCapabilityActiveModelId(capability)
+      || (!('active_model_id' in capability) && capability.runtime_ready
+        ? capability.current_model?.model_name?.trim()
+        : '');
     if (!runtimeModel) {
       return false;
     }
@@ -3409,8 +3547,9 @@ export class HarborAssistantComponent implements OnInit {
       }
     });
 
-    return Array.from(catalogById.values())
-      .map((model) => this.buildCustomerModelCard(model))
+    return this.uniqueModelCards(
+      Array.from(catalogById.values()).map((model) => this.buildCustomerModelCard(model)),
+    )
       .sort((left, right) => this.compareCustomerModelCards(left, right));
   }
 
@@ -3865,6 +4004,44 @@ export class HarborAssistantComponent implements OnInit {
           ...this.endpointErrors(),
           localDownloads: `local-downloads: ${this.getErrorMessage(error)}`,
         });
+      },
+    });
+  }
+
+  private pollKnowledgeIndexJobs(): void {
+    if (this.knowledgeIndexPollInProgress()) {
+      return;
+    }
+
+    const previousActiveJob = this.activeKnowledgeIndexJob();
+    this.knowledgeIndexPollInProgress.set(true);
+    this.harborAssistantApi.getKnowledgeIndexJobs().pipe(
+      finalize(() => this.knowledgeIndexPollInProgress.set(false)),
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (response) => {
+        this.knowledgeIndexJobs.set(response);
+        const activeJob = response.jobs.find((job) => {
+          return job.status === 'queued' || job.status === 'running';
+        });
+        if (!previousActiveJob || activeJob) {
+          return;
+        }
+
+        const finishedJob = response.jobs.find((job) => job.job_id === previousActiveJob.job_id);
+        if (finishedJob?.status === 'completed') {
+          this.actionMessage.set(T('Knowledge indexing completed.'));
+        } else if (finishedJob?.status === 'failed') {
+          this.actionError.set(finishedJob.error_message || T('Knowledge indexing failed.'));
+        } else if (finishedJob?.status === 'canceled') {
+          this.actionMessage.set(T('Knowledge indexing was canceled.'));
+        }
+        this.fetchKnowledgeIndexState()
+          .pipe(takeUntilDestroyed(this.destroyRef))
+          .subscribe();
+      },
+      error: () => {
+        // Progress is supplementary; normal search and settings remain usable.
       },
     });
   }
@@ -5163,6 +5340,10 @@ export class HarborAssistantComponent implements OnInit {
       case 'aiot':
       case 'dvr':
         return 'camera';
+      case 'rules':
+      case 'automation':
+      case 'reviews':
+        return 'rules';
       case 'diagnostics':
       case 'system':
       case 'harboros':
