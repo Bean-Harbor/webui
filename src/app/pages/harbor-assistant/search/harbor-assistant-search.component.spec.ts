@@ -1,8 +1,9 @@
 import { fakeAsync, tick } from '@angular/core/testing';
-import { createComponentFactory, Spectator } from '@ngneat/spectator/jest';
+import { createComponentFactory, mockProvider, Spectator } from '@ngneat/spectator/jest';
 import { MockComponent } from 'ng-mocks';
 import { MarkdownModule } from 'ngx-markdown';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
+import { DialogService } from 'app/modules/dialog/dialog.service';
 import { PageHeaderComponent } from 'app/modules/page-header/page-title-header/page-header.component';
 import { KnowledgeSourceRoot } from 'app/pages/harbor-assistant/interfaces/harbor-assistant-status.interface';
 import { HarborAssistantSearchComponent } from 'app/pages/harbor-assistant/search/harbor-assistant-search.component';
@@ -25,6 +26,9 @@ describe('Harbor Assistant search component', () => {
         provide: HarborAssistantContentApiService,
         useFactory: (): Partial<Record<keyof HarborAssistantContentApiService, jest.Mock>> => api,
       },
+      mockProvider(DialogService, {
+        confirm: jest.fn(() => of(true)),
+      }),
     ],
   });
 
@@ -202,7 +206,7 @@ describe('Harbor Assistant search component', () => {
     expect(spectator.query('.knowledge-index-progress')).toHaveText('85%');
   });
 
-  it('keeps automatic routing when the @ source scope is cleared', fakeAsync(() => {
+  it('switches to ordinary chat when the last source is cleared and does not send an empty source list', fakeAsync(() => {
     spectator = createSearchComponent();
     const component = spectator.component as unknown as {
       form: { controls: { query: { setValue: (value: string) => void } } };
@@ -218,6 +222,7 @@ describe('Harbor Assistant search component', () => {
     spectator.detectChanges();
     expect(sourceTrigger).not.toHaveClass('selected');
     expect(selectAll?.getAttribute('aria-checked')).toBe('false');
+    expect(sourceTrigger).toHaveText('Ordinary chat');
 
     component.form.controls.query.setValue('我今天不开心，跟我谈谈话');
     component.search();
@@ -225,8 +230,13 @@ describe('Harbor Assistant search component', () => {
 
     expect(api.search).toHaveBeenCalledWith(expect.objectContaining({
       query: '我今天不开心，跟我谈谈话',
-      retrieval_mode: 'auto',
+      retrieval_mode: 'off',
     }));
+    expect(api.search).toHaveBeenCalledWith(expect.not.objectContaining({ source_root_ids: expect.anything() }));
+
+    spectator.click(spectator.queryAll<HTMLButtonElement>('.source-option:not(.all-sources)')[0]);
+    spectator.detectChanges();
+    expect(sourceTrigger).toHaveText('Ordinary chat');
   }));
 
   it('lets the user choose automatic, forced retrieval, or ordinary chat', fakeAsync(() => {
@@ -235,7 +245,7 @@ describe('Harbor Assistant search component', () => {
       form: { controls: {
         query: { setValue: (value: string) => void };
         retrievalMode: { setValue: (value: 'auto' | 'on' | 'off') => void };
-      } };
+      }; };
       search: () => void;
     };
 
@@ -261,7 +271,7 @@ describe('Harbor Assistant search component', () => {
     const component = spectator.component as unknown as {
       form: { controls: {
         query: { setValue: (value: string) => void };
-      } };
+      }; };
       search: () => void;
     };
 
@@ -370,6 +380,7 @@ describe('Harbor Assistant search component', () => {
         query: '有哪些春天的文章',
         answer: '找到《spring.md》。 [1]',
         response: {
+          kind: 'rag.answer',
           status: 'completed',
           degraded: false,
           query: '有哪些春天的文章',
@@ -432,6 +443,7 @@ describe('Harbor Assistant search component', () => {
   }));
 
   it('stores only recent search terms and reuses them without changing filters', fakeAsync(() => {
+    localStorage.setItem('harborAssistant.searchTerms.v1', JSON.stringify(['old persisted query']));
     spectator = createSearchComponent();
     const component = spectator.component as unknown as {
       form: {
@@ -452,7 +464,7 @@ describe('Harbor Assistant search component', () => {
     tick();
     spectator.detectChanges();
 
-    expect(JSON.parse(localStorage.getItem('harborAssistant.searchTerms.v1') ?? '[]')).toEqual(['谁在倒啤酒']);
+    expect(localStorage.getItem('harborAssistant.searchTerms.v1')).toBeNull();
     expect(spectator.query('.user-bubble')).toHaveText('谁在倒啤酒');
 
     component.useSearchHistoryTerm('最近有哪些录像');
@@ -461,6 +473,53 @@ describe('Harbor Assistant search component', () => {
     expect(component.form.controls.query.value).toBe('最近有哪些录像');
     expect(component.form.controls.filter.value).toBe('videos');
     expect(component.form.controls.from.value).toBe('2026-05-04T10:00');
+  }));
+
+  it('does not write a response into a conversation that is no longer active', fakeAsync(() => {
+    const search$ = new Subject<HarborAssistantSearchResponse>();
+    api.search = jest.fn(() => search$);
+    spectator = createSearchComponent();
+    const component = spectator.component as unknown as {
+      activeConversationId: { set: (value: string) => void };
+      chatTurns: () => unknown[];
+      form: { controls: { query: { setValue: (value: string) => void } } };
+      search: () => void;
+    };
+
+    component.form.controls.query.setValue('first conversation question');
+    component.search();
+    component.activeConversationId.set('conv-newer');
+    search$.next(searchResponse({ answer: 'stale answer' }));
+    search$.complete();
+    tick();
+
+    expect(component.chatTurns()).toEqual([]);
+    expect(spectator.element).not.toHaveText('stale answer');
+  }));
+
+  it('confirms deletion and keeps the affected row busy until deletion completes', fakeAsync(() => {
+    const deletion$ = new Subject<{ deleted: boolean; conversation_id: string }>();
+    api.conversations = jest.fn(() => of({
+      conversations: [{ conversation_id: 'conv-delete', title: 'Delete me', turn_count: 1 }],
+      settings: { history_limit: 10, context_turn_limit: 3, context_token_limit: 8192 },
+    }));
+    api.deleteConversation = jest.fn(() => deletion$);
+    spectator = createSearchComponent();
+    const deleteButton = spectator.query<HTMLButtonElement>('.delete-conversation') as HTMLButtonElement;
+
+    spectator.click(deleteButton);
+    spectator.detectChanges();
+
+    expect(spectator.inject(DialogService).confirm).toHaveBeenCalled();
+    expect(api.deleteConversation).toHaveBeenCalledWith('conv-delete');
+    expect(deleteButton.getAttribute('aria-busy')).toBe('true');
+
+    deletion$.next({ deleted: true, conversation_id: 'conv-delete' });
+    deletion$.complete();
+    tick();
+    spectator.detectChanges();
+
+    expect(deleteButton.getAttribute('aria-busy')).toBe('false');
   }));
 });
 

@@ -105,6 +105,7 @@ export interface HarborAssistantQueryUnderstanding {
 }
 
 export interface HarborAssistantKnowledgeAnswerResponse {
+  kind: 'rag.answer';
   conversation_id?: string;
   status: string;
   degraded: boolean;
@@ -117,6 +118,10 @@ export interface HarborAssistantKnowledgeAnswerResponse {
   warnings: string[];
   query_understanding?: HarborAssistantQueryUnderstanding | null;
 }
+
+export type HarborAssistantSearchWireResponse
+  = | HarborAssistantKnowledgeAnswerResponse
+    | HarborAssistantSearchResponse;
 
 export interface HarborAssistantKnowledgeSuggestion {
   subject: string;

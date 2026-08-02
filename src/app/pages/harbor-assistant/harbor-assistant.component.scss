@@ -36,6 +36,8 @@ $hd-space-5: 20px;
 }
 
 .harbor-assistant-page {
+  --bg1: #f8fafc;
+  --bg2: #fff;
   --fg1: #172033;
   --fg2: #64748b;
   --lines: rgba(15, 23, 42, 0.12);
@@ -78,16 +80,15 @@ $hd-space-5: 20px;
   color: $hd-text-secondary;
   cursor: pointer;
   display: flex;
+  flex: 0 0 auto;
   font: inherit;
   font-weight: 600;
   justify-content: center;
   line-height: 1.2;
   min-height: 56px;
-  min-width: 0;
-  overflow: hidden;
+  min-width: fit-content;
   padding: 0 $hd-space-4;
   text-align: center;
-  text-overflow: ellipsis;
   white-space: nowrap;
 
   &:hover {

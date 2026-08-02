@@ -2,7 +2,13 @@
   <aside class="conversation-sidebar" aria-label="Conversation history">
     <div class="conversation-sidebar-header">
       <strong>{{ 'Harbor Assistant' | translate }}</strong>
-      <button mat-stroked-button class="new-conversation-button" type="button" (click)="clearConversation()">
+      <button
+        mat-stroked-button
+        class="new-conversation-button"
+        type="button"
+        [disabled]="conversationBusy()"
+        (click)="clearConversation()"
+      >
         <span class="new-conversation-icon" aria-hidden="true">＋</span>
         {{ 'New conversation' | translate }}
       </button>
@@ -20,7 +26,12 @@
           class="conversation-item"
           [class.active]="conversation.conversation_id === activeConversationId()"
         >
-          <button type="button" class="conversation-select" (click)="loadConversation(conversation.conversation_id)">
+          <button
+            type="button"
+            class="conversation-select"
+            [disabled]="conversationBusy()"
+            (click)="loadConversation(conversation.conversation_id)"
+          >
             <strong>{{ conversation.title }}</strong>
             <small>{{ conversation.turn_count }} {{ 'messages' | translate }}</small>
           </button>
@@ -28,8 +39,15 @@
             type="button"
             class="delete-conversation"
             [attr.aria-label]="'Delete conversation' | translate"
+            [attr.aria-busy]="conversationDeleting(conversation.conversation_id)"
+            [disabled]="conversationBusy()"
             (click)="deleteConversation($event, conversation.conversation_id)"
-          >×
+          >
+            @if (conversationDeleting(conversation.conversation_id)) {
+              <span class="delete-conversation-spinner" aria-hidden="true"></span>
+            } @else {
+              <tn-icon name="delete" library="mdi"></tn-icon>
+            }
           </button>
         </div>
       }
@@ -67,7 +85,7 @@
             {{ 'The assistant automatically reserves space for the answer and protects the current question.' | translate }}
           </small>
         </label>
-        <button mat-stroked-button type="submit" [disabled]="conversationSettingsForm.invalid || conversationSettingsSaving()">
+        <button mat-stroked-button type="submit" [disabled]="conversationSettingsForm.invalid || conversationBusy()">
           {{ 'Save' | translate }}
         </button>
       </form>
@@ -363,7 +381,13 @@
             </details>
           </div>
 
-          <button mat-flat-button color="primary" class="send-button" type="submit" [disabled]="loading() || form.invalid">
+          <button
+            mat-flat-button
+            color="primary"
+            class="send-button"
+            type="submit"
+            [disabled]="conversationBusy() || form.invalid"
+          >
             {{ 'Send' | translate }}
           </button>
         </div>

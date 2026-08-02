@@ -7,14 +7,19 @@ import { MatCard, MatCardContent } from '@angular/material/card';
 import { MatDialog } from '@angular/material/dialog';
 import { MatProgressBar } from '@angular/material/progress-bar';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
+import { TnIconComponent } from '@truenas/ui-components';
 import { MarkdownModule } from 'ngx-markdown';
-import { finalize } from 'rxjs/operators';
+import { filter as filterOperator, finalize, switchMap } from 'rxjs/operators';
 import { WINDOW } from 'app/helpers/window.helper';
+import { DialogService } from 'app/modules/dialog/dialog.service';
 import {
   KnowledgeIndexJobRecord,
   KnowledgeSourceRoot,
 } from 'app/pages/harbor-assistant/interfaces/harbor-assistant-status.interface';
-import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
+import {
+  HarborAssistantContentApiService,
+  normalizeHarborAssistantSearchResponse,
+} from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
 import {
   buildHarborAssistantSearchPayload,
   buildHarborAssistantSearchWaterfallItems,
@@ -35,7 +40,6 @@ import {
   HarborAssistantSearchResponse,
   HarborAssistantSearchWaterfallItem,
   HarborAssistantConversationSummary,
-  HarborAssistantKnowledgeAnswerResponse,
   HarborAssistantRetrievalMode,
   HarborAssistantRetrievalSettings,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
@@ -80,15 +84,19 @@ interface HarborAssistantRetrievalSource {
     MatCardContent,
     MatProgressBar,
     MarkdownModule,
+    TnIconComponent,
   ],
 })
 export class HarborAssistantSearchComponent implements OnInit {
   private nextTurnId = 1;
+  private searchRequestSequence = 0;
+  private conversationLoadSequence = 0;
   private retrievalSourcesInitialized = false;
   private readonly searchHistoryStorageKey = 'harborAssistant.searchTerms.v1';
   private readonly formBuilder = inject(NonNullableFormBuilder);
   private readonly api = inject(HarborAssistantContentApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly dialogService = inject(DialogService);
   private readonly translate = inject(TranslateService);
   private readonly window = inject<Window>(WINDOW);
   @ViewChild('chatScroll') private chatScroll?: ElementRef<HTMLElement>;
@@ -120,7 +128,13 @@ export class HarborAssistantSearchComponent implements OnInit {
   protected readonly activeConversationId = signal(this.newConversationId());
   protected readonly conversationHistoryLoading = signal(false);
   protected readonly conversationSettingsSaving = signal(false);
+  protected readonly deletingConversationIds = signal<ReadonlySet<string>>(new Set());
   protected readonly retrievalSettingsBusy = signal(false);
+  protected readonly conversationBusy = computed(() => this.loading()
+    || this.conversationHistoryLoading()
+    || this.conversationSettingsSaving()
+    || this.deletingConversationIds().size > 0);
+
   protected readonly retrievalSources = computed<HarborAssistantRetrievalSource[]>(() => this.knowledgeSourceRoots()
     .filter((root) => root.enabled)
     .map((root) => ({ id: root.root_id, label: root.label || root.path, description: root.path })));
@@ -135,7 +149,11 @@ export class HarborAssistantSearchComponent implements OnInit {
         return availableIds;
       }
       const available = new Set(availableIds);
-      return selected.filter((sourceId) => available.has(sourceId));
+      const next = selected.filter((sourceId) => available.has(sourceId));
+      if (selected.length > 0 && next.length === 0) {
+        this.form.controls.retrievalMode.setValue('off');
+      }
+      return next;
     });
   });
 
@@ -143,19 +161,23 @@ export class HarborAssistantSearchComponent implements OnInit {
   protected readonly pendingQuery = signal<string | null>(null);
 
   ngOnInit(): void {
-    this.searchHistory.set(this.loadSearchHistory());
+    this.removeLegacySearchHistory();
     this.refreshPromptSuggestions();
     this.refreshConversations();
   }
 
   search(): void {
-    if (this.form.invalid || this.loading()) {
+    if (this.form.invalid || this.conversationBusy()) {
       return;
     }
 
     const query = this.form.controls.query.value.trim();
     const filter = this.form.controls.filter.value;
-    const retrievalMode = this.form.controls.retrievalMode.value;
+    const sourceRootIds = this.selectedRetrievalSources();
+    const retrievalMode = sourceRootIds.length === 0 ? 'off' : this.form.controls.retrievalMode.value;
+    if (retrievalMode !== this.form.controls.retrievalMode.value) {
+      this.form.controls.retrievalMode.setValue(retrievalMode);
+    }
     const useRetrieval = retrievalMode !== 'off';
     this.rememberSearchTerm(query);
     const payload = buildHarborAssistantSearchPayload(
@@ -164,13 +186,18 @@ export class HarborAssistantSearchComponent implements OnInit {
       null,
       {
         from: this.localDateTimeToUnixSeconds(this.form.controls.from.value),
-        sourceRootIds: this.selectedRetrievalSources(),
+        sourceRootIds,
         sourceScope: 'all',
         to: this.localDateTimeToUnixSeconds(this.form.controls.to.value),
         retrievalMode,
       },
     );
+    if (sourceRootIds.length === 0) {
+      delete payload.source_root_ids;
+    }
     payload.conversation_id = this.activeConversationId();
+    const requestConversationId = payload.conversation_id;
+    const requestId = ++this.searchRequestSequence;
 
     this.loading.set(true);
     this.error.set(null);
@@ -180,12 +207,18 @@ export class HarborAssistantSearchComponent implements OnInit {
 
     this.api.search(payload).pipe(
       finalize(() => {
+        if (requestId !== this.searchRequestSequence) {
+          return;
+        }
         this.loading.set(false);
         this.pendingQuery.set(null);
         this.scrollToLatestTurn();
       }),
     ).subscribe({
       next: (response) => {
+        if (requestId !== this.searchRequestSequence || this.activeConversationId() !== requestConversationId) {
+          return;
+        }
         this.response.set(response);
         this.chatTurns.update((turns) => [
           ...turns,
@@ -197,6 +230,9 @@ export class HarborAssistantSearchComponent implements OnInit {
         this.refreshConversations();
       },
       error: (error: unknown) => {
+        if (requestId !== this.searchRequestSequence || this.activeConversationId() !== requestConversationId) {
+          return;
+        }
         this.response.set(null);
         const message = harborAssistantSearchErrorMessage(error);
         this.error.set(message);
@@ -212,49 +248,75 @@ export class HarborAssistantSearchComponent implements OnInit {
   }
 
   clearConversation(): void {
-    this.activeConversationId.set(this.newConversationId());
-    this.chatTurns.set([]);
-    this.pendingQuery.set(null);
-    this.response.set(null);
-    this.error.set(null);
+    if (this.conversationBusy()) {
+      return;
+    }
+    this.resetConversation(this.newConversationId());
   }
 
   loadConversation(conversationId: string): void {
-    if (this.loading() || conversationId === this.activeConversationId()) {
+    if (this.conversationBusy() || conversationId === this.activeConversationId()) {
       return;
     }
+    const requestId = ++this.conversationLoadSequence;
     this.conversationHistoryLoading.set(true);
     this.api.conversation(conversationId).pipe(
-      finalize(() => this.conversationHistoryLoading.set(false)),
+      finalize(() => {
+        if (requestId === this.conversationLoadSequence) {
+          this.conversationHistoryLoading.set(false);
+        }
+      }),
     ).subscribe({
       next: (detail) => {
+        if (requestId !== this.conversationLoadSequence || detail.conversation_id !== conversationId) {
+          return;
+        }
         this.activeConversationId.set(detail.conversation_id);
+        this.searchRequestSequence += 1;
         this.nextTurnId = 1;
         this.chatTurns.set(detail.turns.map((turn) => ({
           id: this.nextTurnId++,
           query: turn.query,
           filter: 'all',
           useRetrieval: turn.response.query_understanding?.needs_retrieval ?? true,
-          response: this.toSearchResponse(turn.response),
+          response: normalizeHarborAssistantSearchResponse(turn.response, detail.conversation_id),
         })));
         const turns = this.chatTurns();
         this.response.set(turns[turns.length - 1]?.response ?? null);
         this.error.set(null);
         this.scrollToLatestTurn();
       },
-      error: () => this.error.set('Unable to load this conversation.'),
+      error: () => {
+        if (requestId === this.conversationLoadSequence) {
+          this.error.set('Unable to load this conversation.');
+        }
+      },
     });
   }
 
   deleteConversation(event: Event, conversationId: string): void {
     event.stopPropagation();
-    if (this.loading()) {
+    if (this.conversationBusy()) {
       return;
     }
-    this.api.deleteConversation(conversationId).subscribe({
+    this.dialogService.confirm({
+      title: this.translate.instant('Delete conversation'),
+      message: this.translate.instant('Are you sure you want to delete this conversation? This cannot be undone.'),
+      buttonText: this.translate.instant('Delete'),
+      buttonColor: 'warn',
+      hideCheckbox: true,
+    }).pipe(
+      filterOperator(Boolean),
+      switchMap(() => {
+        this.setConversationDeleting(conversationId, true);
+        return this.api.deleteConversation(conversationId).pipe(
+          finalize(() => this.setConversationDeleting(conversationId, false)),
+        );
+      }),
+    ).subscribe({
       next: () => {
         if (conversationId === this.activeConversationId()) {
-          this.clearConversation();
+          this.resetConversation(this.newConversationId());
         }
         this.refreshConversations();
       },
@@ -263,7 +325,7 @@ export class HarborAssistantSearchComponent implements OnInit {
   }
 
   saveConversationSettings(): void {
-    if (this.conversationSettingsForm.invalid || this.conversationSettingsSaving()) {
+    if (this.conversationSettingsForm.invalid || this.conversationBusy()) {
       return;
     }
     const settings = this.conversationSettingsForm.getRawValue();
@@ -316,7 +378,6 @@ export class HarborAssistantSearchComponent implements OnInit {
 
   clearSearchHistory(): void {
     this.searchHistory.set([]);
-    this.saveSearchHistory([]);
   }
 
   waterfallItems(
@@ -331,15 +392,25 @@ export class HarborAssistantSearchComponent implements OnInit {
   }
 
   toggleRetrievalSource(source: HarborAssistantRetrievalSource['id']): void {
-    this.selectedRetrievalSources.update((selected) => (selected.includes(source)
-      ? selected.filter((item) => item !== source)
-      : [...selected, source]));
+    this.selectedRetrievalSources.update((selected) => {
+      const next = selected.includes(source)
+        ? selected.filter((item) => item !== source)
+        : [...selected, source];
+      if (next.length === 0) {
+        this.form.controls.retrievalMode.setValue('off');
+      }
+      return next;
+    });
   }
 
   toggleAllRetrievalSources(): void {
-    this.selectedRetrievalSources.set(this.allRetrievalSourcesSelected()
+    const next = this.allRetrievalSourcesSelected()
       ? []
-      : this.retrievalSources().map((source) => source.id));
+      : this.retrievalSources().map((source) => source.id);
+    this.selectedRetrievalSources.set(next);
+    if (next.length === 0) {
+      this.form.controls.retrievalMode.setValue('off');
+    }
   }
 
   retrievalSourceSelected(source: HarborAssistantRetrievalSource['id']): boolean {
@@ -665,19 +736,6 @@ export class HarborAssistantSearchComponent implements OnInit {
     });
   }
 
-  private toSearchResponse(response: HarborAssistantKnowledgeAnswerResponse): HarborAssistantSearchResponse {
-    return {
-      ...response.search,
-      conversation_id: response.conversation_id ?? this.activeConversationId(),
-      answer: response.answer,
-      answer_degraded: response.degraded,
-      answer_degraded_reason: response.degraded_reason,
-      answer_intent: response.query_understanding?.intent ?? null,
-      review_scope: response.review_scope ?? null,
-      warnings: [...new Set([...response.search.warnings, ...response.warnings])],
-    };
-  }
-
   private newConversationId(): string {
     return `conv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   }
@@ -692,26 +750,39 @@ export class HarborAssistantSearchComponent implements OnInit {
       ...this.searchHistory().filter((item) => item !== term),
     ].slice(0, 10);
     this.searchHistory.set(next);
-    this.saveSearchHistory(next);
   }
 
-  private loadSearchHistory(): string[] {
+  private removeLegacySearchHistory(): void {
     try {
-      const raw = this.window.localStorage.getItem(this.searchHistoryStorageKey);
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed)
-        ? parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, 10)
-        : [];
+      this.window.localStorage.removeItem(this.searchHistoryStorageKey);
     } catch {
-      return [];
+      // The in-memory suggestions remain available when browser storage is disabled.
     }
   }
 
-  private saveSearchHistory(history: string[]): void {
-    try {
-      this.window.localStorage.setItem(this.searchHistoryStorageKey, JSON.stringify(history));
-    } catch {
-      // Local search history is best-effort only.
-    }
+  private resetConversation(conversationId: string): void {
+    this.searchRequestSequence += 1;
+    this.conversationLoadSequence += 1;
+    this.activeConversationId.set(conversationId);
+    this.chatTurns.set([]);
+    this.pendingQuery.set(null);
+    this.response.set(null);
+    this.error.set(null);
+  }
+
+  protected conversationDeleting(conversationId: string): boolean {
+    return this.deletingConversationIds().has(conversationId);
+  }
+
+  private setConversationDeleting(conversationId: string, deleting: boolean): void {
+    this.deletingConversationIds.update((current) => {
+      const next = new Set(current);
+      if (deleting) {
+        next.add(conversationId);
+      } else {
+        next.delete(conversationId);
+      }
+      return next;
+    });
   }
 }

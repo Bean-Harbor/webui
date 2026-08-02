@@ -6767,6 +6767,7 @@
   "The assistant automatically reserves space for the answer and protects the current question.": "助手会自动预留回答空间，并始终保护当前问题和关键约束。",
   "Configure how many chats are saved and how many recent turns are sent as context.": "设置保留多少个聊天，以及每次回答携带最近多少轮上下文。",
   "Delete conversation": "删除对话",
+  "Are you sure you want to delete this conversation? This cannot be undone.": "确定要删除此对话吗？此操作无法撤销。",
   "History settings": "历史记录设置",
   "No conversation history yet.": "暂无对话历史。",
   "Recent conversations": "最近对话",
@@ -6774,5 +6775,13 @@
   "Saved conversations": "保存的对话数",
   "messages": "条消息",
   "Shared model": "共用模型",
-  "Uses the same running model as": "与以下能力共用同一运行模型："
+  "Uses the same running model as": "与以下能力共用同一运行模型：",
+  "Audio": "音频",
+  "Model mismatch": "模型不匹配",
+  "Requested model": "请求的模型",
+  "Switch failed": "切换失败",
+  "Switching": "正在切换",
+  "Switching to": "正在切换到",
+  "The current model is still serving requests.": "当前模型仍在处理请求。",
+  "The requested model could not be activated.": "无法启用请求的模型。"
 }

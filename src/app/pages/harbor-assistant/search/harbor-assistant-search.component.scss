@@ -126,6 +126,27 @@
   width: 22px;
 }
 
+.delete-conversation tn-icon {
+  display: block;
+  height: 18px;
+  width: 18px;
+}
+
+.delete-conversation-spinner {
+  animation: delete-conversation-spin 800ms linear infinite;
+  border: 2px solid color-mix(in srgb, var(--fg2) 28%, transparent);
+  border-radius: 50%;
+  border-top-color: var(--fg2);
+  display: block;
+  height: 12px;
+  margin: 3px;
+  width: 12px;
+}
+
+@keyframes delete-conversation-spin {
+  to { transform: rotate(360deg); }
+}
+
 .conversation-item:hover .delete-conversation,
 .delete-conversation:focus-visible {
   opacity: 1;
@@ -703,8 +724,17 @@
 .typing-indicator span:nth-child(3) { animation-delay: 300ms; }
 
 @keyframes typing-bounce {
-  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
-  30% { opacity: 1; transform: translateY(-4px); }
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-4px);
+  }
 }
 
 .composer-dock {
@@ -830,12 +860,14 @@
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
   display: grid;
   gap: 9px;
-  left: 0;
+  box-sizing: border-box;
+  left: auto;
   max-height: min(620px, calc(100vh - 170px));
   min-width: 480px;
   overflow-y: auto;
   padding: 14px;
   position: absolute;
+  right: 0;
   z-index: 20;
 }
 
@@ -981,18 +1013,20 @@
 
 @media (max-width: 760px) {
   .harbor-assistant-chat-page {
-    flex-direction: row;
+    flex-direction: column;
     height: 100%;
     min-height: 0;
     overflow: hidden;
   }
 
   .conversation-sidebar {
-    border-bottom: 0;
-    border-right: 1px solid var(--lines);
-    flex: 0 0 210px;
-    max-height: none;
+    border-bottom: 1px solid var(--lines);
+    border-right: 0;
+    flex: 0 0 auto;
+    max-height: 32vh;
+    overflow-y: auto;
     padding: 12px 9px;
+    width: 100%;
   }
 
   .chat-shell {
@@ -1033,8 +1067,14 @@
   }
 
   .options-popover {
-    left: -114px;
-    min-width: min(420px, calc(100vw - 40px));
+    bottom: 10px;
+    left: 10px;
+    max-height: calc(100dvh - 20px);
+    max-width: none;
+    min-width: 0;
+    position: fixed;
+    right: 10px;
+    width: auto;
   }
 
   .mode-toggle {
@@ -1044,10 +1084,6 @@
 }
 
 @media (max-width: 520px) {
-  .conversation-sidebar {
-    flex-basis: 176px;
-  }
-
   .conversation-sidebar-header > strong,
   .conversation-list-heading {
     font-size: 11px;

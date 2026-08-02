@@ -462,11 +462,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (result.images.length > 0) {
       filters.push('images');
     }
-    if (result.documents.some((hit) => hit.modality !== 'audio')) {
+    if (result.documents.length > 0) {
       filters.push('text');
-    }
-    if (result.documents.some((hit) => hit.modality === 'audio')) {
-      filters.push('audio');
     }
     if (result.videos.length > 0) {
       filters.push('videos');
@@ -1785,9 +1782,6 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   kindLabel(item: HarborAssistantSearchWaterfallItem): string {
-    if (item.kind === 'audio') {
-      return 'Audio';
-    }
     if (item.kind === 'image') {
       return 'Image';
     }
@@ -1848,8 +1842,6 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   filterLabel(filter: HarborAssistantSearchResultFilter): string {
     switch (filter) {
-      case 'audio':
-        return 'Audio';
       case 'images':
         return 'Image';
       case 'text':
