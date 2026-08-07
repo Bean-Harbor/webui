@@ -3,12 +3,14 @@ import { MatTabGroup } from '@angular/material/tabs';
 import { createComponentFactory, Spectator } from '@ngneat/spectator/jest';
 import Hls from 'hls.js';
 import { MockComponent } from 'ng-mocks';
-import { of, Subject, throwError } from 'rxjs';
+import { NEVER, of, Subject, throwError } from 'rxjs';
+import { WINDOW } from 'app/helpers/window.helper';
 import { PageHeaderComponent } from 'app/modules/page-header/page-title-header/page-header.component';
 import { HarborAssistantCameraComponent } from 'app/pages/harbor-assistant/camera/harbor-assistant-camera.component';
 import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantDetectionJobResponse,
   HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
   HarborAssistantSearchDvrStatusResponse,
@@ -51,6 +53,11 @@ describe('Harbor Assistant camera component', () => {
       stopCameraLiveSession: jest.fn(() => of(liveSession({ status: 'stopped', playlist_url: null, playlist_ready: false }))),
       cameraLiveStatus: jest.fn(() => of(liveSession())),
       harborLinkCapabilities: jest.fn(() => of(harborLinkCapabilities())),
+      startDetectionJob: jest.fn(() => of(detectionJob({ reused: false }))),
+      detectionJob: jest.fn(() => of(detectionJob())),
+      renewDetectionJob: jest.fn(() => of(detectionJob())),
+      stopDetectionJob: jest.fn(() => of(detectionJob({ status: 'stopped' }))),
+      stopDetectionJobOnPageExit: jest.fn(),
       createSnapshotTask: jest.fn(() => snapshotSubject$.asObservable()),
       startDvrRecording: jest.fn(() => of(dvrStatus('recording'))),
       stopDvrRecording: jest.fn(() => of(dvrStatus('stopped'))),
@@ -634,6 +641,676 @@ describe('Harbor Assistant camera component', () => {
     spectator.component.ngOnDestroy();
 
     expect(api.stopCameraLiveSession).toHaveBeenCalledWith('cam-1', 'live-unmount-pending');
+    discardPeriodicTasks();
+  }));
+
+  it('starts cat detection for the live camera and clears it when live stops', fakeAsync(() => {
+    spectator = createComponent();
+    const strokeRect = jest.fn();
+    const canvas = {
+      getContext: jest.fn(() => ({
+        clearRect: jest.fn(),
+        fillRect: jest.fn(),
+        fillText: jest.fn(),
+        measureText: jest.fn(() => ({ width: 50 })),
+        strokeRect,
+      } as unknown as CanvasRenderingContext2D)),
+      height: 0,
+      width: 0,
+    } as unknown as HTMLCanvasElement;
+    const video = fakeLiveVideo({
+      videoHeight: 720,
+      videoWidth: 1280,
+    });
+    const componentState = spectator.component as unknown as {
+      catDetectionOverlay: { nativeElement: HTMLCanvasElement };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      liveVideo: { nativeElement: HTMLVideoElement };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.catDetectionOverlay = { nativeElement: canvas };
+    componentState.liveVideo = { nativeElement: video };
+    componentState.hlsLiveStatus.set('live');
+
+    componentState.setCatDetectionEnabled(true);
+
+    expect(api.startDetectionJob).toHaveBeenCalledWith('cam-1', 'sub');
+    expect(strokeRect).toHaveBeenCalledWith(100, 120, 300, 300);
+
+    spectator.component.stopLive(false);
+
+    expect(api.stopDetectionJob).toHaveBeenCalledWith('yolo-test');
+    expect(canvas.width).toBe(1280);
+    expect(canvas.height).toBe(720);
+    discardPeriodicTasks();
+  }));
+
+  it('polls the active cat detection job every 40 ms', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+
+    componentState.setCatDetectionEnabled(true);
+
+    expect(api.detectionJob).not.toHaveBeenCalled();
+    tick(39);
+    expect(api.detectionJob).not.toHaveBeenCalled();
+    tick(1);
+    expect(api.detectionJob).toHaveBeenCalledTimes(1);
+
+    componentState.setCatDetectionEnabled(false);
+    discardPeriodicTasks();
+  }));
+
+  it('draws cat detection results up to 1500 ms old and rejects older results', fakeAsync(() => {
+    const latestResult = detectionJob().latest_result;
+    if (!latestResult) {
+      throw new Error('Expected the detection job fixture to include a result.');
+    }
+    api.startDetectionJob = jest.fn(() => of(detectionJob({
+      latest_result: {
+        ...latestResult,
+        processed_epoch_ms: Date.now() - 1_300,
+      },
+    })));
+    api.detectionJob = jest.fn(() => of(detectionJob({
+      latest_result: {
+        ...latestResult,
+        processed_epoch_ms: Date.now() - 1_501,
+      },
+    })));
+    spectator = createComponent();
+    const strokeRect = jest.fn();
+    const canvas = {
+      getContext: jest.fn(() => ({
+        clearRect: jest.fn(),
+        fillRect: jest.fn(),
+        fillText: jest.fn(),
+        measureText: jest.fn(() => ({ width: 50 })),
+        strokeRect,
+      } as unknown as CanvasRenderingContext2D)),
+      height: 0,
+      width: 0,
+    } as unknown as HTMLCanvasElement;
+    const componentState = spectator.component as unknown as {
+      catDetectionOverlay: { nativeElement: HTMLCanvasElement };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      liveVideo: { nativeElement: HTMLVideoElement };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.catDetectionOverlay = { nativeElement: canvas };
+    componentState.liveVideo = {
+      nativeElement: fakeLiveVideo({
+        videoHeight: 720,
+        videoWidth: 1280,
+      }),
+    };
+    componentState.hlsLiveStatus.set('live');
+
+    componentState.setCatDetectionEnabled(true);
+
+    expect(strokeRect).toHaveBeenCalledTimes(1);
+    tick(200);
+    expect(strokeRect).toHaveBeenCalledTimes(1);
+    componentState.setCatDetectionEnabled(false);
+    discardPeriodicTasks();
+  }));
+
+  it('stops active cat detection with keepalive when the page exits', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    spectator.inject<Window>(WINDOW).dispatchEvent(new Event('pagehide'));
+
+    expect(api.stopDetectionJobOnPageExit).toHaveBeenCalledWith('yolo-test');
+    discardPeriodicTasks();
+  }));
+
+  it('does not stop a live-managed cat detection job when the display switch is turned off', fakeAsync(() => {
+    api.startDetectionJob = jest.fn(() => of(detectionJob({
+      managed_by_live: true,
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    componentState.setCatDetectionEnabled(false);
+
+    expect(api.stopDetectionJob).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('does not stop a live-managed cat detection job when live stops or the page exits', fakeAsync(() => {
+    api.startDetectionJob = jest.fn(() => of(detectionJob({
+      managed_by_live: true,
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    spectator.inject<Window>(WINDOW).dispatchEvent(new Event('pagehide'));
+
+    expect(api.stopDetectionJobOnPageExit).not.toHaveBeenCalled();
+
+    componentState.setCatDetectionEnabled(true);
+    spectator.component.stopLive(false);
+
+    expect(api.stopDetectionJob).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('does not own, renew, or stop a reused cat detection job when the display is turned off', fakeAsync(() => {
+    api.startDetectionJob = jest.fn(() => of(detectionJob({
+      reused: true,
+    } as Partial<HarborAssistantDetectionJobResponse> & { reused: boolean })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionRenewTimer: number | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    expect(componentState.catDetectionRenewTimer).toBeNull();
+
+    componentState.setCatDetectionEnabled(false);
+
+    expect(api.renewDetectionJob).not.toHaveBeenCalled();
+    expect(api.stopDetectionJob).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('does not stop a reused cat detection job when the page exits', fakeAsync(() => {
+    api.startDetectionJob = jest.fn(() => of(detectionJob({ reused: true })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    spectator.inject<Window>(WINDOW).dispatchEvent(new Event('pagehide'));
+
+    expect(api.stopDetectionJobOnPageExit).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('does not own a detection job when an older backend omits reused', fakeAsync(() => {
+    api.startDetectionJob = jest.fn(() => of(detectionJob({
+      managed_by_live: false,
+      reused: undefined,
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionRenewTimer: number | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    expect(componentState.catDetectionRenewTimer).toBeNull();
+
+    spectator.inject<Window>(WINDOW).dispatchEvent(new Event('pagehide'));
+    componentState.setCatDetectionEnabled(false);
+
+    expect(api.renewDetectionJob).not.toHaveBeenCalled();
+    expect(api.stopDetectionJob).not.toHaveBeenCalled();
+    expect(api.stopDetectionJobOnPageExit).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('serializes cat detection stop before a new start', fakeAsync(() => {
+    const stopSubject$ = new Subject<HarborAssistantDetectionJobResponse>();
+    api.stopDetectionJob = jest.fn(() => stopSubject$.asObservable());
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    componentState.setCatDetectionEnabled(false);
+    componentState.setCatDetectionEnabled(true);
+
+    expect(api.stopDetectionJob).toHaveBeenCalledTimes(1);
+    expect(api.startDetectionJob).toHaveBeenCalledTimes(1);
+
+    stopSubject$.next(detectionJob({ status: 'stopped' }));
+    stopSubject$.complete();
+
+    expect(api.startDetectionJob).toHaveBeenCalledTimes(2);
+    discardPeriodicTasks();
+  }));
+
+  it('stops a newly created detection job that arrives after detection was turned off', fakeAsync(() => {
+    const startSubject$ = new Subject<HarborAssistantDetectionJobResponse>();
+    api.startDetectionJob = jest.fn(() => startSubject$.asObservable());
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    componentState.setCatDetectionEnabled(false);
+    startSubject$.next(detectionJob({ reused: false }));
+
+    expect(api.stopDetectionJob).toHaveBeenCalledWith('yolo-test');
+    expect(api.startDetectionJob).toHaveBeenCalledTimes(1);
+    discardPeriodicTasks();
+  }));
+
+  it('cleans up a newly created detection job whose start response arrives after destroy', fakeAsync(() => {
+    const startSubject$ = new Subject<HarborAssistantDetectionJobResponse>();
+    api.startDetectionJob = jest.fn(() => startSubject$.asObservable());
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    spectator.fixture.destroy();
+    startSubject$.next(detectionJob({ reused: false }));
+
+    expect(api.stopDetectionJob).toHaveBeenCalledWith('yolo-test');
+    discardPeriodicTasks();
+  }));
+
+  it('restores an owned cat detection job when stopping it fails', fakeAsync(() => {
+    api.stopDetectionJob = jest.fn(() => throwError(() => new Error('stop failed')));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionBusy: () => boolean;
+      catDetectionEnabled: () => boolean;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    componentState.setCatDetectionEnabled(false);
+
+    expect(componentState.catDetectionBusy()).toBe(false);
+    expect(componentState.catDetectionEnabled()).toBe(true);
+    expect(componentState.catDetectionJob()?.job_id).toBe('yolo-test');
+    expect(spectator.component.catDetectionStatusLabel()).toBe('NPU · 14 ms · 1 cat');
+    discardPeriodicTasks();
+  }));
+
+  it('does not restore or renew detection when stopping live cannot delete the owned job', fakeAsync(() => {
+    api.stopDetectionJob = jest.fn(() => throwError(() => new Error('stop failed')));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionBusy: () => boolean;
+      catDetectionEnabled: () => boolean;
+      catDetectionError: () => string | null;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      catDetectionRenewTimer: number | null;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveSession.set(liveSession());
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    spectator.component.stopLive(false);
+
+    expect(componentState.catDetectionBusy()).toBe(false);
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()?.job_id).toBe('yolo-test');
+    expect(componentState.catDetectionRenewTimer).toBeNull();
+    expect(componentState.catDetectionError()).toContain('stop failed');
+    expect(api.renewDetectionJob).not.toHaveBeenCalled();
+    expect(spectator.component.liveCanStart()).toBe(false);
+    discardPeriodicTasks();
+  }));
+
+  it('times out an unresponsive detection stop without allowing an overlapping job', fakeAsync(() => {
+    api.stopDetectionJob = jest.fn(() => NEVER);
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionBusy: () => boolean;
+      catDetectionEnabled: () => boolean;
+      catDetectionError: () => string | null;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveSession.set(liveSession());
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    spectator.component.stopLive(false);
+    tick(10_001);
+
+    expect(componentState.catDetectionBusy()).toBe(false);
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()?.job_id).toBe('yolo-test');
+    expect(componentState.catDetectionError()).toContain('unconfirmed');
+    expect(spectator.component.liveCanStart()).toBe(false);
+
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    expect(api.startDetectionJob).toHaveBeenCalledTimes(1);
+    discardPeriodicTasks();
+  }));
+
+  it('labels cat detection only after the provider is known', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionBusy: { set: (value: boolean) => void };
+      catDetectionJob: { set: (value: HarborAssistantDetectionJobResponse) => void };
+    };
+    componentState.catDetectionBusy.set(true);
+
+    expect(spectator.component.catDetectionStatusLabel()).toBe('Starting detection...');
+
+    componentState.catDetectionBusy.set(false);
+    componentState.catDetectionJob.set(detectionJob({
+      latest_result: undefined,
+      metrics: undefined,
+    }));
+
+    expect(spectator.component.catDetectionStatusLabel()).toBe('Waiting for first result...');
+
+    componentState.catDetectionJob.set(detectionJob({
+      latest_result: undefined,
+      metrics: {
+        status: 'running',
+        provider: 'CPUExecutionProvider',
+        frames_processed: 0,
+        cat_frames: 0,
+        average_inference_ms: 0,
+        p95_inference_ms: 0,
+        uptime_ms: 0,
+        updated_at_epoch_ms: Date.now(),
+      },
+    }));
+
+    expect(spectator.component.catDetectionStatusLabel()).toBe('CPU');
+
+    componentState.catDetectionJob.set(detectionJob());
+
+    expect(spectator.component.catDetectionStatusLabel()).toBe('NPU · 14 ms · 1 cat');
+    discardPeriodicTasks();
+  }));
+
+  it('serializes live stop before a new live start', fakeAsync(() => {
+    const stopSubject$ = new Subject<HarborAssistantCameraLiveSessionResponse>();
+    api.stopCameraLiveSession = jest.fn(() => stopSubject$.asObservable());
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+    };
+    componentState.hlsLiveSession.set(liveSession());
+    componentState.hlsLiveStatus.set('live');
+    api.startCameraLiveSession?.mockClear();
+
+    spectator.component.stopLive(false);
+    spectator.component.startLive();
+
+    expect(api.stopCameraLiveSession).toHaveBeenCalledTimes(1);
+    expect(api.startCameraLiveSession).not.toHaveBeenCalled();
+    expect(spectator.component.liveCanStart()).toBe(false);
+
+    stopSubject$.next(liveSession({ status: 'stopped' }));
+    stopSubject$.complete();
+    spectator.component.startLive();
+
+    expect(api.startCameraLiveSession).toHaveBeenCalledTimes(1);
+    discardPeriodicTasks();
+  }));
+
+  it('stops a live session whose start response arrives after stop', fakeAsync(() => {
+    const startSubject$ = new Subject<HarborAssistantCameraLiveSessionResponse>();
+    api.startCameraLiveSession = jest.fn(() => startSubject$.asObservable());
+    spectator = createComponent();
+    api.stopCameraLiveSession?.mockClear();
+
+    spectator.component.startLive();
+    spectator.component.stopLive(false);
+    startSubject$.next(liveSession({ session_id: 'late-live-stop' }));
+
+    expect(api.stopCameraLiveSession).toHaveBeenCalledWith('cam-1', 'late-live-stop');
+    discardPeriodicTasks();
+  }));
+
+  it('cleans up a live session whose start response arrives after destroy', fakeAsync(() => {
+    const startSubject$ = new Subject<HarborAssistantCameraLiveSessionResponse>();
+    api.startCameraLiveSession = jest.fn(() => startSubject$.asObservable());
+    spectator = createComponent();
+    api.stopCameraLiveSession?.mockClear();
+
+    spectator.component.startLive();
+    spectator.fixture.destroy();
+    startSubject$.next(liveSession({ session_id: 'late-live-destroy' }));
+
+    expect(api.stopCameraLiveSession).toHaveBeenCalledWith('cam-1', 'late-live-destroy');
+    discardPeriodicTasks();
+  }));
+
+  it('times out an unresponsive live stop without allowing an overlapping session', fakeAsync(() => {
+    api.stopCameraLiveSession = jest.fn(() => NEVER);
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveError: () => string | null;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      liveStopPending: boolean;
+    };
+    componentState.hlsLiveSession.set(liveSession());
+    componentState.hlsLiveStatus.set('live');
+    api.startCameraLiveSession?.mockClear();
+
+    spectator.component.stopLive(false);
+    tick(10_001);
+
+    expect(componentState.liveStopPending).toBe(false);
+    expect(componentState.hlsLiveError()).toContain('unconfirmed');
+    expect(spectator.component.liveCanStart()).toBe(false);
+
+    spectator.component.startLive();
+
+    expect(api.startCameraLiveSession).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('automatically starts the selected profile after the active live session stops', fakeAsync(() => {
+    const stopSubject$ = new Subject<HarborAssistantCameraLiveSessionResponse>();
+    api.stopCameraLiveSession = jest.fn(() => stopSubject$.asObservable());
+    api.startCameraLiveSession = jest.fn((_deviceId: string, profile: string) => of(liveSession({
+      session_id: `live-${profile}`,
+      stream_profile: profile,
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+    };
+    componentState.hlsLiveSession.set(liveSession({ session_id: 'live-sub', stream_profile: 'sub' }));
+    componentState.hlsLiveStatus.set('live');
+    api.startCameraLiveSession.mockClear();
+
+    spectator.component.selectStreamProfile('main');
+
+    expect(api.stopCameraLiveSession).toHaveBeenCalledWith('cam-1', 'live-sub');
+    expect(api.startCameraLiveSession).not.toHaveBeenCalled();
+
+    stopSubject$.next(liveSession({ session_id: 'live-sub', status: 'stopped' }));
+    stopSubject$.complete();
+
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'main');
+    discardPeriodicTasks();
+  }));
+
+  it('treats an absent stale live session as a confirmed stop during profile switching', fakeAsync(() => {
+    api.stopCameraLiveSession = jest.fn(() => throwError(() => Object.assign(new Error('session absent'), {
+      error: { code: 'MEDIA_SESSION_NOT_FOUND' },
+      status: 404,
+    })));
+    api.startCameraLiveSession = jest.fn((_deviceId: string, profile: string) => of(liveSession({
+      session_id: `live-${profile}`,
+      stream_profile: profile,
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveError: () => string | null;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+    };
+    componentState.hlsLiveSession.set(liveSession({ session_id: 'live-sub', stream_profile: 'sub' }));
+    componentState.hlsLiveStatus.set('live');
+    api.startCameraLiveSession.mockClear();
+
+    spectator.component.selectStreamProfile('main');
+
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'main');
+    expect(componentState.hlsLiveError()).toBeNull();
+    discardPeriodicTasks();
+  }));
+
+  it('keeps the transition canvas mounted while the startup snapshot is visible', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+    };
+    componentState.hlsLiveStatus.set('starting');
+
+    spectator.detectChanges();
+
+    expect(spectator.query('.live-panel img')).not.toBeNull();
+    expect(spectator.query('.live-transition-frame')).not.toBeNull();
+    discardPeriodicTasks();
+  }));
+
+  it('keeps the startup snapshot over the video until the first live frame is ready', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      hlsLiveUrl: { set: (value: string | null) => void };
+    };
+    componentState.hlsLiveStatus.set('starting');
+    componentState.hlsLiveUrl.set('/api/beacon/cameras/cam-1/live/live-test/index.m3u8');
+
+    spectator.detectChanges();
+
+    expect(spectator.query('.live-panel video')).not.toBeNull();
+    expect(spectator.query('.live-panel img.live-starting-frame')).not.toBeNull();
+    componentState.hlsLiveUrl.set(null);
+    componentState.hlsLiveStatus.set('stopped');
+    spectator.detectChanges();
+    discardPeriodicTasks();
+  }));
+
+  it('freezes the startup snapshot before attaching WebRTC playback', fakeAsync(() => {
+    spectator = createComponent();
+    const image = {
+      complete: true,
+      naturalHeight: 720,
+      naturalWidth: 1280,
+    } as HTMLImageElement;
+    const transitionCanvas = fakeTransitionCanvas();
+    const componentState = spectator.component as unknown as {
+      beginLiveTransportTransition: (target: 'webrtc') => void;
+      liveImage?: { nativeElement: HTMLImageElement };
+      liveTransitionFrame?: { nativeElement: HTMLCanvasElement };
+      liveTransitionFrameVisible: () => boolean;
+    };
+    componentState.liveImage = { nativeElement: image };
+    componentState.liveTransitionFrame = { nativeElement: transitionCanvas.canvas };
+
+    componentState.beginLiveTransportTransition('webrtc');
+
+    expect(transitionCanvas.drawImage).toHaveBeenCalledWith(image, 0, 0, 1280, 720);
+    expect(componentState.liveTransitionFrameVisible()).toBe(true);
+    discardPeriodicTasks();
+  }));
+
+  it('restores requested cat detection after the switched profile renders its first frame', fakeAsync(() => {
+    api.startCameraLiveSession = jest.fn((_deviceId: string, profile: string) => of(liveSession({
+      session_id: `live-${profile}`,
+      stream_profile: profile,
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionEnabled: { set: (value: boolean) => void };
+      catDetectionJob: { set: (value: HarborAssistantDetectionJobResponse) => void };
+      catDetectionRequestedEnabled: boolean;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      markHlsPlaybackReady: () => void;
+    };
+    componentState.hlsLiveSession.set(liveSession({ session_id: 'live-sub', stream_profile: 'sub' }));
+    componentState.hlsLiveStatus.set('live');
+    componentState.catDetectionEnabled.set(true);
+    componentState.catDetectionRequestedEnabled = true;
+    componentState.catDetectionJob.set(detectionJob({ managed_by_live: true, stream_profile: 'sub' }));
+    api.startDetectionJob?.mockClear();
+
+    spectator.component.selectStreamProfile('main');
+    componentState.markHlsPlaybackReady();
+
+    expect(api.startDetectionJob).toHaveBeenCalledWith('cam-1', 'main');
+    discardPeriodicTasks();
+  }));
+
+  it('releases the frozen frame and switch lock when the target profile cannot start', fakeAsync(() => {
+    api.startCameraLiveSession = jest.fn(() => throwError(() => new Error('start failed')));
+    spectator = createComponent();
+    const transitionCanvas = fakeTransitionCanvas();
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      liveControlPlaybackMode: { set: (value: 'webrtc') => void };
+      liveStreamSwitching: () => boolean;
+      liveTransitionFrame?: { nativeElement: HTMLCanvasElement };
+      liveTransitionFrameVisible: () => boolean;
+      liveVideo?: { nativeElement: HTMLVideoElement };
+    };
+    componentState.hlsLiveSession.set(liveSession({ session_id: 'live-sub', stream_profile: 'sub' }));
+    componentState.hlsLiveStatus.set('live');
+    componentState.liveControlPlaybackMode.set('webrtc');
+    componentState.liveTransitionFrame = { nativeElement: transitionCanvas.canvas };
+    componentState.liveVideo = {
+      nativeElement: fakeLiveVideo({
+        readyState: HTMLMediaElement.HAVE_CURRENT_DATA,
+        videoHeight: 720,
+        videoWidth: 1280,
+      }),
+    };
+
+    spectator.component.selectStreamProfile('main');
+
+    expect(componentState.liveStreamSwitching()).toBe(false);
+    expect(componentState.liveTransitionFrameVisible()).toBe(false);
     discardPeriodicTasks();
   }));
 
@@ -2783,6 +3460,45 @@ function dvrStatus(status = 'stopped'): HarborAssistantSearchDvrStatusResponse {
         live_mjpeg_url: '/api/cameras/cam-1/live.mjpeg',
       },
     ],
+  };
+}
+
+function detectionJob(
+  options: Partial<HarborAssistantDetectionJobResponse> = {},
+): HarborAssistantDetectionJobResponse {
+  return {
+    job_id: 'yolo-test',
+    camera_id: 'cam-1',
+    status: 'running',
+    target_labels: ['cat'],
+    stream_profile: 'sub',
+    max_fps: 25,
+    confidence: 0.35,
+    lease_id: 'lease-test',
+    started_at: '2026-07-24T00:00:00Z',
+    updated_at: '2026-07-24T00:00:00Z',
+    expires_at: '2026-07-24T00:05:00Z',
+    latest_result: {
+      schema: 'harbornavi.k3.yoloDetectionResult.v1',
+      ok: true,
+      sequence: 1,
+      target_label: 'cat',
+      provider: 'SpaceMITExecutionProvider',
+      frame_epoch_ms: Date.now(),
+      processed_epoch_ms: Date.now(),
+      result_age_ms: 8,
+      inference_ms: 14,
+      detection_count: 1,
+      detections: [{
+        label: 'cat',
+        confidence: 0.91,
+        x1: 100,
+        y1: 120,
+        x2: 400,
+        y2: 420,
+      }],
+    },
+    ...options,
   };
 }
 

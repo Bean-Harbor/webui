@@ -7,6 +7,7 @@ import {
 } from '@angular/common/http/testing';
 import { SpectatorService, createServiceFactory, mockProvider } from '@ngneat/spectator/jest';
 import { firstValueFrom, of } from 'rxjs';
+import { WINDOW } from 'app/helpers/window.helper';
 import { AuthService } from 'app/modules/auth/auth.service';
 import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
 import {
@@ -406,6 +407,74 @@ describe('Harbor Assistant content API service', () => {
     await secondPromise;
   });
 
+  it('manages cat detection jobs through same-origin Beacon endpoints', async () => {
+    const startPromise = firstValueFrom(
+      spectator.service.startDetectionJob('camera/main', 'sub'),
+    );
+    const startRequest = httpMock.expectOne('/api/harbor-beacon/vision/detection-jobs');
+    expect(startRequest.request.method).toBe('POST');
+    expect(startRequest.request.body).toEqual({
+      camera_id: 'camera/main',
+      target_labels: ['cat'],
+      duration_seconds: 300,
+      max_fps: 25,
+      confidence: 0.50,
+      stream_profile: 'sub',
+    });
+    startRequest.flush(detectionJob());
+    expect((await startPromise).job_id).toBe('yolo-test');
+
+    const getPromise = firstValueFrom(spectator.service.detectionJob('yolo/test'));
+    httpMock.expectOne('/api/harbor-beacon/vision/detection-jobs/yolo%2Ftest').flush(detectionJob());
+    expect((await getPromise).status).toBe('running');
+
+    const renewPromise = firstValueFrom(spectator.service.renewDetectionJob('yolo/test', 300));
+    const renewRequest = httpMock.expectOne(
+      '/api/harbor-beacon/vision/detection-jobs/yolo%2Ftest/renew',
+    );
+    expect(renewRequest.request.method).toBe('POST');
+    expect(renewRequest.request.body).toEqual({ ttl_seconds: 300 });
+    renewRequest.flush(detectionJob());
+    expect((await renewPromise).status).toBe('running');
+
+    const stopPromise = firstValueFrom(spectator.service.stopDetectionJob('yolo/test'));
+    const stopRequest = httpMock.expectOne(
+      '/api/harbor-beacon/vision/detection-jobs/yolo%2Ftest',
+    );
+    expect(stopRequest.request.method).toBe('DELETE');
+    stopRequest.flush(detectionJob({ status: 'stopped' }));
+    expect((await stopPromise).status).toBe('stopped');
+  });
+
+  it('keeps the detection stop request alive while the page exits', () => {
+    const injectedWindow = spectator.inject<Window>(WINDOW);
+    const originalFetch = Object.getOwnPropertyDescriptor(injectedWindow, 'fetch');
+    const fetchSpy = jest.fn(() => Promise.resolve({} as Response));
+    Object.defineProperty(injectedWindow, 'fetch', {
+      configurable: true,
+      value: fetchSpy,
+      writable: true,
+    });
+
+    try {
+      spectator.service.stopDetectionJobOnPageExit('yolo/test');
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/api/harbor-beacon/vision/detection-jobs/yolo%2Ftest',
+        {
+          keepalive: true,
+          method: 'DELETE',
+        },
+      );
+    } finally {
+      if (originalFetch) {
+        Object.defineProperty(injectedWindow, 'fetch', originalFetch);
+      } else {
+        Reflect.deleteProperty(injectedWindow, 'fetch');
+      }
+    }
+  });
+
   it('uses same-origin Harbor Assistant proxy paths and avoids direct service ports', () => {
     const sources = [
       'src/app/pages/harbor-assistant/shared/harbor-assistant-content-api.service.ts',
@@ -484,5 +553,22 @@ function searchResponse(partial: Partial<HarborAssistantSearchResponse> = {}): H
     resource_profile: 'cpu_only',
     answer: partial.answer,
     review_scope: partial.review_scope,
+  };
+}
+
+function detectionJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    job_id: 'yolo-test',
+    camera_id: 'camera/main',
+    status: 'running',
+    target_labels: ['cat'],
+    stream_profile: 'sub',
+    max_fps: 25,
+    confidence: 0.35,
+    lease_id: 'lease-test',
+    started_at: '2026-07-24T00:00:00Z',
+    updated_at: '2026-07-24T00:00:00Z',
+    expires_at: '2026-07-24T00:05:00Z',
+    ...overrides,
   };
 }

@@ -60,6 +60,7 @@ cmp "$current_manifest" "$installed_manifest"
 nginx_config="$extract_root/etc/nginx/conf.d/harbornavi-webui.conf"
 grep -Fq 'location = /api/harbor-beacon {' "$nginx_config"
 grep -Fq 'location /api/harbor-beacon/ {' "$nginx_config"
+grep -Fq 'location ^~ /shared/cameras/ {' "$nginx_config"
 
 python3 - \
   "$current_manifest" \
