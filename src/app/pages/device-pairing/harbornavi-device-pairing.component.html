@@ -12,7 +12,6 @@
           formControlName="pairingCode"
           autocomplete="one-time-code"
           spellcheck="false"
-          autofocus
         />
         @if (form.controls.pairingCode.touched && form.controls.pairingCode.invalid) {
           <mat-error>{{ 'Enter a pairing code.' | translate }}</mat-error>
