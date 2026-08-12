@@ -58,6 +58,11 @@ dpkg-deb --extract "$current_deb" "$extract_root"
 installed_manifest="$extract_root/usr/share/doc/harbornavi-assistant-webui/release-manifest.json"
 cmp "$current_manifest" "$installed_manifest"
 nginx_config="$extract_root/etc/nginx/conf.d/harbornavi-webui.conf"
+grep -Fq 'server_name ~^.+$;' "$nginx_config"
+if grep -Fq 'location = /api/current {' "$nginx_config"; then
+  echo 'HarborNavi package must not depend on the HarborOS middleware login endpoint.' >&2
+  exit 1
+fi
 grep -Fq 'location = /api/harbor-beacon {' "$nginx_config"
 grep -Fq 'location /api/harbor-beacon/ {' "$nginx_config"
 grep -Fq 'location ^~ /shared/cameras/ {' "$nginx_config"

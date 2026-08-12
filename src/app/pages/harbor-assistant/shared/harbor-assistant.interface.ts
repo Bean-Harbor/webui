@@ -272,6 +272,14 @@ export interface HarborAssistantDetectionMetrics {
   updated_at_epoch_ms: number;
 }
 
+export interface HarborAssistantCatDetectionObservation {
+  camera_id: string;
+  status: string;
+  stream_profile: string;
+  latest_result?: HarborAssistantDetectionResult | null;
+  metrics?: HarborAssistantDetectionMetrics | null;
+}
+
 export interface HarborAssistantDetectionJobResponse {
   job_id: string;
   camera_id: string;

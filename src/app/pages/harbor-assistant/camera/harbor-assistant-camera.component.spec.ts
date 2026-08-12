@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fakeAsync, tick, discardPeriodicTasks, flushMicrotasks } from '@angular/core/testing';
 import { MatTabGroup } from '@angular/material/tabs';
 import { createComponentFactory, Spectator } from '@ngneat/spectator/jest';
@@ -53,11 +55,8 @@ describe('Harbor Assistant camera component', () => {
       stopCameraLiveSession: jest.fn(() => of(liveSession({ status: 'stopped', playlist_url: null, playlist_ready: false }))),
       cameraLiveStatus: jest.fn(() => of(liveSession())),
       harborLinkCapabilities: jest.fn(() => of(harborLinkCapabilities())),
-      startDetectionJob: jest.fn(() => of(detectionJob({ reused: false }))),
+      detectionJobForCamera: jest.fn(() => of(detectionJob({ managed_by_live: true }))),
       detectionJob: jest.fn(() => of(detectionJob())),
-      renewDetectionJob: jest.fn(() => of(detectionJob())),
-      stopDetectionJob: jest.fn(() => of(detectionJob({ status: 'stopped' }))),
-      stopDetectionJobOnPageExit: jest.fn(),
       createSnapshotTask: jest.fn(() => snapshotSubject$.asObservable()),
       startDvrRecording: jest.fn(() => of(dvrStatus('recording'))),
       stopDvrRecording: jest.fn(() => of(dvrStatus('stopped'))),
@@ -644,7 +643,7 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it('starts cat detection for the live camera and clears it when live stops', fakeAsync(() => {
+  it('observes an existing running detection job and only clears the local display when turned off', fakeAsync(() => {
     spectator = createComponent();
     const strokeRect = jest.fn();
     const canvas = {
@@ -658,34 +657,37 @@ describe('Harbor Assistant camera component', () => {
       height: 0,
       width: 0,
     } as unknown as HTMLCanvasElement;
-    const video = fakeLiveVideo({
-      videoHeight: 720,
-      videoWidth: 1280,
-    });
     const componentState = spectator.component as unknown as {
+      catDetectionEnabled: () => boolean;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
       catDetectionOverlay: { nativeElement: HTMLCanvasElement };
       hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
       liveVideo: { nativeElement: HTMLVideoElement };
       setCatDetectionEnabled: (enabled: boolean) => void;
     };
     componentState.catDetectionOverlay = { nativeElement: canvas };
-    componentState.liveVideo = { nativeElement: video };
+    componentState.liveVideo = {
+      nativeElement: fakeLiveVideo({
+        videoHeight: 720,
+        videoWidth: 1280,
+      }),
+    };
     componentState.hlsLiveStatus.set('live');
 
     componentState.setCatDetectionEnabled(true);
 
-    expect(api.startDetectionJob).toHaveBeenCalledWith('cam-1', 'sub');
+    expect(api.detectionJobForCamera).toHaveBeenCalledWith('cam-1', 'sub');
+    expect(componentState.catDetectionJob()?.status).toBe('running');
     expect(strokeRect).toHaveBeenCalledWith(100, 120, 300, 300);
 
-    spectator.component.stopLive(false);
+    componentState.setCatDetectionEnabled(false);
 
-    expect(api.stopDetectionJob).toHaveBeenCalledWith('yolo-test');
-    expect(canvas.width).toBe(1280);
-    expect(canvas.height).toBe(720);
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()).toBeNull();
     discardPeriodicTasks();
   }));
 
-  it('polls the active cat detection job every 40 ms', fakeAsync(() => {
+  it('polls cat observation by camera and profile every 40 ms', fakeAsync(() => {
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
       hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
@@ -695,34 +697,276 @@ describe('Harbor Assistant camera component', () => {
 
     componentState.setCatDetectionEnabled(true);
 
+    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(1);
     expect(api.detectionJob).not.toHaveBeenCalled();
     tick(39);
-    expect(api.detectionJob).not.toHaveBeenCalled();
+    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(1);
     tick(1);
-    expect(api.detectionJob).toHaveBeenCalledTimes(1);
+    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(2);
+    expect(api.detectionJobForCamera).toHaveBeenLastCalledWith('cam-1', 'sub');
+    expect(api.detectionJob).not.toHaveBeenCalled();
 
     componentState.setCatDetectionEnabled(false);
     discardPeriodicTasks();
   }));
 
-  it('draws cat detection results up to 1500 ms old and rejects older results', fakeAsync(() => {
-    const latestResult = detectionJob().latest_result;
-    if (!latestResult) {
-      throw new Error('Expected the detection job fixture to include a result.');
-    }
-    api.startDetectionJob = jest.fn(() => of(detectionJob({
-      latest_result: {
-        ...latestResult,
-        processed_epoch_ms: Date.now() - 1_300,
-      },
-    })));
-    api.detectionJob = jest.fn(() => of(detectionJob({
-      latest_result: {
-        ...latestResult,
-        processed_epoch_ms: Date.now() - 1_501,
-      },
-    })));
+  it('ignores delayed detection discovery after the display is quickly turned off', fakeAsync(() => {
+    const discovery$ = new Subject<HarborAssistantDetectionJobResponse>();
+    api.detectionJobForCamera = jest.fn(() => discovery$.asObservable());
     spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionEnabled: () => boolean;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+
+    componentState.setCatDetectionEnabled(true);
+    componentState.setCatDetectionEnabled(false);
+    discovery$.next(detectionJob({ managed_by_live: true }));
+    discovery$.complete();
+
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()).toBeNull();
+    expect(api.detectionJob).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('does not discover a manual detection job while live is still starting', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('starting');
+
+    expect(spectator.component.catDetectionCanStart()).toBe(false);
+    componentState.setCatDetectionEnabled(true);
+
+    expect(api.detectionJobForCamera).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('clears only the local detection subscription when the page exits', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionEnabled: () => boolean;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    spectator.inject<Window>(WINDOW).dispatchEvent(new Event('pagehide'));
+
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()).toBeNull();
+    tick(100);
+    expect(api.detectionJob).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('clears only the local detection subscription when the camera changes', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionEnabled: () => boolean;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    spectator.component.selectCamera('cam-2');
+
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()).toBeNull();
+    discardPeriodicTasks();
+  }));
+
+  it('ignores delayed detection discovery after the component is destroyed', fakeAsync(() => {
+    const discovery$ = new Subject<HarborAssistantDetectionJobResponse>();
+    api.detectionJobForCamera = jest.fn(() => discovery$.asObservable());
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    spectator.fixture.destroy();
+    discovery$.next(detectionJob({ managed_by_live: true }));
+    discovery$.complete();
+
+    expect(componentState.catDetectionJob()).toBeNull();
+    discardPeriodicTasks();
+  }));
+
+  it('converges an absent observed detection job without retrying', fakeAsync(() => {
+    api.detectionJobForCamera = jest.fn()
+      .mockReturnValueOnce(of(detectionJob()))
+      .mockReturnValueOnce(throwError(() => Object.assign(new Error('job not found'), { status: 404 })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionEnabled: () => boolean;
+      catDetectionError: () => string | null;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    tick(40);
+
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()).toBeNull();
+    expect(componentState.catDetectionError()).toBeNull();
+    tick(4_000);
+    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(2);
+    expect(api.detectionJob).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('keeps detection display disabled when discovery finds no running job', fakeAsync(() => {
+    api.detectionJobForCamera = jest.fn(() => throwError(() => Object.assign(new Error('job not found'), { status: 404 })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionEnabled: () => boolean;
+      catDetectionError: () => string | null;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+
+    componentState.setCatDetectionEnabled(true);
+
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()).toBeNull();
+    expect(componentState.catDetectionError()).toBeNull();
+    tick(4_000);
+    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(1);
+    expect(api.detectionJob).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('converges a terminal observed detection job without retrying', fakeAsync(() => {
+    api.detectionJobForCamera = jest.fn()
+      .mockReturnValueOnce(of(detectionJob()))
+      .mockReturnValueOnce(of(detectionJob({
+        status: 'stopped',
+        message: 'Detection provider stopped.',
+      })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionEnabled: () => boolean;
+      catDetectionError: () => string | null;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+
+    tick(40);
+
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()).toBeNull();
+    expect(componentState.catDetectionError()).toBe('Cat detection stopped.');
+    tick(4_000);
+    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(2);
+    expect(api.detectionJob).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('ages detection results by local receipt time and sequence instead of server epoch', fakeAsync(() => {
+    let monotonicNow = 100;
+    api.detectionJobForCamera = jest.fn()
+      .mockReturnValueOnce(of(detectionJob({
+        latest_result: {
+          ...detectionJob().latest_result!,
+          sequence: 7,
+          processed_epoch_ms: 1,
+        },
+      })))
+      .mockReturnValueOnce(of(detectionJob({
+        latest_result: {
+          ...detectionJob().latest_result!,
+          sequence: 7,
+          processed_epoch_ms: 1,
+        },
+      })))
+      .mockReturnValueOnce(of(detectionJob({
+        latest_result: {
+          ...detectionJob().latest_result!,
+          sequence: 8,
+          processed_epoch_ms: 1,
+        },
+      })));
+    spectator = createComponent();
+    const strokeRect = jest.fn();
+    const canvas = {
+      getContext: jest.fn(() => ({
+        clearRect: jest.fn(),
+        fillRect: jest.fn(),
+        fillText: jest.fn(),
+        measureText: jest.fn(() => ({ width: 50 })),
+        strokeRect,
+      } as unknown as CanvasRenderingContext2D)),
+      height: 0,
+      width: 0,
+    } as unknown as HTMLCanvasElement;
+    const componentState = spectator.component as unknown as {
+      catDetectionOverlay: { nativeElement: HTMLCanvasElement };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      liveVideo: { nativeElement: HTMLVideoElement };
+      monotonicNow: () => number;
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.catDetectionOverlay = { nativeElement: canvas };
+    componentState.liveVideo = {
+      nativeElement: fakeLiveVideo({ videoHeight: 720, videoWidth: 1280 }),
+    };
+    componentState.monotonicNow = () => monotonicNow;
+    componentState.hlsLiveStatus.set('live');
+
+    componentState.setCatDetectionEnabled(true);
+
+    expect(strokeRect).toHaveBeenCalled();
+    strokeRect.mockClear();
+    monotonicNow = 1_601;
+    tick(40);
+    expect(strokeRect).not.toHaveBeenCalled();
+
+    monotonicNow = 1_602;
+    tick(40);
+    expect(strokeRect).toHaveBeenCalled();
+    componentState.setCatDetectionEnabled(false);
+    discardPeriodicTasks();
+  }));
+
+  it('ages detection results with local wall time when the Performance API is unavailable', fakeAsync(() => {
+    let localNow = 100;
+    jest.spyOn(Date, 'now').mockImplementation(() => localNow);
+    const result = {
+      ...detectionJob().latest_result!,
+      sequence: 9,
+      processed_epoch_ms: 1,
+    };
+    api.detectionJobForCamera = jest.fn(() => of(detectionJob({ latest_result: result })));
+    spectator = createComponent();
+    const windowRef = spectator.inject<Window>(WINDOW);
+    const performance = windowRef.performance;
+    const performanceNowDescriptor = Object.getOwnPropertyDescriptor(performance, 'now');
+    Object.defineProperty(performance, 'now', {
+      configurable: true,
+      value: undefined,
+    });
     const strokeRect = jest.fn();
     const canvas = {
       getContext: jest.fn(() => ({
@@ -743,282 +987,64 @@ describe('Harbor Assistant camera component', () => {
     };
     componentState.catDetectionOverlay = { nativeElement: canvas };
     componentState.liveVideo = {
-      nativeElement: fakeLiveVideo({
-        videoHeight: 720,
-        videoWidth: 1280,
-      }),
+      nativeElement: fakeLiveVideo({ videoHeight: 720, videoWidth: 1280 }),
+    };
+    componentState.hlsLiveStatus.set('live');
+
+    try {
+      componentState.setCatDetectionEnabled(true);
+      expect(strokeRect).toHaveBeenCalled();
+
+      strokeRect.mockClear();
+      localNow = 1_601;
+      tick(40);
+
+      expect(strokeRect).not.toHaveBeenCalled();
+    } finally {
+      componentState.setCatDetectionEnabled(false);
+      if (performanceNowDescriptor) {
+        Object.defineProperty(performance, 'now', performanceNowDescriptor);
+      } else {
+        delete (performance as Performance & { now?: () => number }).now;
+      }
+      discardPeriodicTasks();
+    }
+  }));
+
+  it('localizes the cat label drawn on the detection overlay', fakeAsync(() => {
+    spectator = createComponent();
+    const fillText = jest.fn();
+    const canvas = {
+      getContext: jest.fn(() => ({
+        clearRect: jest.fn(),
+        fillRect: jest.fn(),
+        fillText,
+        measureText: jest.fn(() => ({ width: 50 })),
+        strokeRect: jest.fn(),
+      } as unknown as CanvasRenderingContext2D)),
+      height: 0,
+      width: 0,
+    } as unknown as HTMLCanvasElement;
+    const componentState = spectator.component as unknown as {
+      catDetectionOverlay: { nativeElement: HTMLCanvasElement };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      liveVideo: { nativeElement: HTMLVideoElement };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+      translate: { instant: (key: string) => string };
+    };
+    componentState.catDetectionOverlay = { nativeElement: canvas };
+    componentState.liveVideo = {
+      nativeElement: fakeLiveVideo({ videoHeight: 720, videoWidth: 1280 }),
+    };
+    componentState.translate = {
+      instant: (key) => (key === 'Cat' ? '猫' : key),
     };
     componentState.hlsLiveStatus.set('live');
 
     componentState.setCatDetectionEnabled(true);
 
-    expect(strokeRect).toHaveBeenCalledTimes(1);
-    tick(200);
-    expect(strokeRect).toHaveBeenCalledTimes(1);
+    expect(fillText).toHaveBeenCalledWith('猫 91%', expect.any(Number), expect.any(Number));
     componentState.setCatDetectionEnabled(false);
-    discardPeriodicTasks();
-  }));
-
-  it('stops active cat detection with keepalive when the page exits', fakeAsync(() => {
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    spectator.inject<Window>(WINDOW).dispatchEvent(new Event('pagehide'));
-
-    expect(api.stopDetectionJobOnPageExit).toHaveBeenCalledWith('yolo-test');
-    discardPeriodicTasks();
-  }));
-
-  it('does not stop a live-managed cat detection job when the display switch is turned off', fakeAsync(() => {
-    api.startDetectionJob = jest.fn(() => of(detectionJob({
-      managed_by_live: true,
-    })));
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    componentState.setCatDetectionEnabled(false);
-
-    expect(api.stopDetectionJob).not.toHaveBeenCalled();
-    discardPeriodicTasks();
-  }));
-
-  it('does not stop a live-managed cat detection job when live stops or the page exits', fakeAsync(() => {
-    api.startDetectionJob = jest.fn(() => of(detectionJob({
-      managed_by_live: true,
-    })));
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    spectator.inject<Window>(WINDOW).dispatchEvent(new Event('pagehide'));
-
-    expect(api.stopDetectionJobOnPageExit).not.toHaveBeenCalled();
-
-    componentState.setCatDetectionEnabled(true);
-    spectator.component.stopLive(false);
-
-    expect(api.stopDetectionJob).not.toHaveBeenCalled();
-    discardPeriodicTasks();
-  }));
-
-  it('does not own, renew, or stop a reused cat detection job when the display is turned off', fakeAsync(() => {
-    api.startDetectionJob = jest.fn(() => of(detectionJob({
-      reused: true,
-    } as Partial<HarborAssistantDetectionJobResponse> & { reused: boolean })));
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      catDetectionRenewTimer: number | null;
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    expect(componentState.catDetectionRenewTimer).toBeNull();
-
-    componentState.setCatDetectionEnabled(false);
-
-    expect(api.renewDetectionJob).not.toHaveBeenCalled();
-    expect(api.stopDetectionJob).not.toHaveBeenCalled();
-    discardPeriodicTasks();
-  }));
-
-  it('does not stop a reused cat detection job when the page exits', fakeAsync(() => {
-    api.startDetectionJob = jest.fn(() => of(detectionJob({ reused: true })));
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    spectator.inject<Window>(WINDOW).dispatchEvent(new Event('pagehide'));
-
-    expect(api.stopDetectionJobOnPageExit).not.toHaveBeenCalled();
-    discardPeriodicTasks();
-  }));
-
-  it('does not own a detection job when an older backend omits reused', fakeAsync(() => {
-    api.startDetectionJob = jest.fn(() => of(detectionJob({
-      managed_by_live: false,
-      reused: undefined,
-    })));
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      catDetectionRenewTimer: number | null;
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    expect(componentState.catDetectionRenewTimer).toBeNull();
-
-    spectator.inject<Window>(WINDOW).dispatchEvent(new Event('pagehide'));
-    componentState.setCatDetectionEnabled(false);
-
-    expect(api.renewDetectionJob).not.toHaveBeenCalled();
-    expect(api.stopDetectionJob).not.toHaveBeenCalled();
-    expect(api.stopDetectionJobOnPageExit).not.toHaveBeenCalled();
-    discardPeriodicTasks();
-  }));
-
-  it('serializes cat detection stop before a new start', fakeAsync(() => {
-    const stopSubject$ = new Subject<HarborAssistantDetectionJobResponse>();
-    api.stopDetectionJob = jest.fn(() => stopSubject$.asObservable());
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    componentState.setCatDetectionEnabled(false);
-    componentState.setCatDetectionEnabled(true);
-
-    expect(api.stopDetectionJob).toHaveBeenCalledTimes(1);
-    expect(api.startDetectionJob).toHaveBeenCalledTimes(1);
-
-    stopSubject$.next(detectionJob({ status: 'stopped' }));
-    stopSubject$.complete();
-
-    expect(api.startDetectionJob).toHaveBeenCalledTimes(2);
-    discardPeriodicTasks();
-  }));
-
-  it('stops a newly created detection job that arrives after detection was turned off', fakeAsync(() => {
-    const startSubject$ = new Subject<HarborAssistantDetectionJobResponse>();
-    api.startDetectionJob = jest.fn(() => startSubject$.asObservable());
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    componentState.setCatDetectionEnabled(false);
-    startSubject$.next(detectionJob({ reused: false }));
-
-    expect(api.stopDetectionJob).toHaveBeenCalledWith('yolo-test');
-    expect(api.startDetectionJob).toHaveBeenCalledTimes(1);
-    discardPeriodicTasks();
-  }));
-
-  it('cleans up a newly created detection job whose start response arrives after destroy', fakeAsync(() => {
-    const startSubject$ = new Subject<HarborAssistantDetectionJobResponse>();
-    api.startDetectionJob = jest.fn(() => startSubject$.asObservable());
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    spectator.fixture.destroy();
-    startSubject$.next(detectionJob({ reused: false }));
-
-    expect(api.stopDetectionJob).toHaveBeenCalledWith('yolo-test');
-    discardPeriodicTasks();
-  }));
-
-  it('restores an owned cat detection job when stopping it fails', fakeAsync(() => {
-    api.stopDetectionJob = jest.fn(() => throwError(() => new Error('stop failed')));
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      catDetectionBusy: () => boolean;
-      catDetectionEnabled: () => boolean;
-      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    componentState.setCatDetectionEnabled(false);
-
-    expect(componentState.catDetectionBusy()).toBe(false);
-    expect(componentState.catDetectionEnabled()).toBe(true);
-    expect(componentState.catDetectionJob()?.job_id).toBe('yolo-test');
-    expect(spectator.component.catDetectionStatusLabel()).toBe('NPU · 14 ms · 1 cat');
-    discardPeriodicTasks();
-  }));
-
-  it('does not restore or renew detection when stopping live cannot delete the owned job', fakeAsync(() => {
-    api.stopDetectionJob = jest.fn(() => throwError(() => new Error('stop failed')));
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      catDetectionBusy: () => boolean;
-      catDetectionEnabled: () => boolean;
-      catDetectionError: () => string | null;
-      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
-      catDetectionRenewTimer: number | null;
-      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveSession.set(liveSession());
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    spectator.component.stopLive(false);
-
-    expect(componentState.catDetectionBusy()).toBe(false);
-    expect(componentState.catDetectionEnabled()).toBe(false);
-    expect(componentState.catDetectionJob()?.job_id).toBe('yolo-test');
-    expect(componentState.catDetectionRenewTimer).toBeNull();
-    expect(componentState.catDetectionError()).toContain('stop failed');
-    expect(api.renewDetectionJob).not.toHaveBeenCalled();
-    expect(spectator.component.liveCanStart()).toBe(false);
-    discardPeriodicTasks();
-  }));
-
-  it('times out an unresponsive detection stop without allowing an overlapping job', fakeAsync(() => {
-    api.stopDetectionJob = jest.fn(() => NEVER);
-    spectator = createComponent();
-    const componentState = spectator.component as unknown as {
-      catDetectionBusy: () => boolean;
-      catDetectionEnabled: () => boolean;
-      catDetectionError: () => string | null;
-      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
-      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
-      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
-      setCatDetectionEnabled: (enabled: boolean) => void;
-    };
-    componentState.hlsLiveSession.set(liveSession());
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    spectator.component.stopLive(false);
-    tick(10_001);
-
-    expect(componentState.catDetectionBusy()).toBe(false);
-    expect(componentState.catDetectionEnabled()).toBe(false);
-    expect(componentState.catDetectionJob()?.job_id).toBe('yolo-test');
-    expect(componentState.catDetectionError()).toContain('unconfirmed');
-    expect(spectator.component.liveCanStart()).toBe(false);
-
-    componentState.hlsLiveStatus.set('live');
-    componentState.setCatDetectionEnabled(true);
-
-    expect(api.startDetectionJob).toHaveBeenCalledTimes(1);
     discardPeriodicTasks();
   }));
 
@@ -1171,6 +1197,152 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('renders detection state, provider, count, and errors in Simplified Chinese', fakeAsync(() => {
+    const zhHans = JSON.parse(readFileSync(
+      join(process.cwd(), 'src/assets/i18n/zh-hans.json'),
+      'utf8',
+    )) as Record<string, string>;
+    expect(zhHans['Starting detection...']).toBe('正在启动猫检测...');
+    expect(zhHans['Stopping detection...']).toBe('正在停止猫检测...');
+    expect(zhHans['Waiting for first result...']).toBe('正在等待首次检测结果...');
+    expect(zhHans['Provider unknown']).toBe('提供方未知');
+    expect(zhHans['{count, plural, one {# cat} other {# cats}}']).toBe('{count} 只猫');
+    expect(zhHans['Unable to observe cat detection.']).toBe('无法查看猫检测。');
+    expect(zhHans['Cat detection stopped.']).toBe('猫检测已停止。');
+
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionBusy: { set: (value: boolean) => void };
+      catDetectionError: () => string | null;
+      catDetectionJob: { set: (value: HarborAssistantDetectionJobResponse | null) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      setCatDetectionEnabled: (enabled: boolean) => void;
+      translate: {
+        instant: (key: string, params?: { count?: number }) => string;
+      };
+    };
+    componentState.translate = {
+      instant: (key, params) => (key === '{count, plural, one {# cat} other {# cats}}'
+        ? `${params?.count} 只猫`
+        : (zhHans[key] ?? key)),
+    };
+
+    componentState.catDetectionBusy.set(true);
+    expect(spectator.component.catDetectionStatusLabel()).toBe('正在启动猫检测...');
+    componentState.catDetectionJob.set(detectionJob());
+    expect(spectator.component.catDetectionStatusLabel()).toBe('正在停止猫检测...');
+
+    componentState.catDetectionBusy.set(false);
+    componentState.catDetectionJob.set(detectionJob({ latest_result: undefined, metrics: undefined }));
+    expect(spectator.component.catDetectionStatusLabel()).toBe('正在等待首次检测结果...');
+    componentState.catDetectionJob.set(detectionJob({
+      latest_result: {
+        ...detectionJob().latest_result!,
+        detection_count: 2,
+        provider: 'unknown-provider',
+      },
+    }));
+    expect(spectator.component.catDetectionStatusLabel()).toBe('提供方未知 · 14 ms · 2 只猫');
+
+    api.detectionJobForCamera = jest.fn(() => throwError(() => new Error('network failed')));
+    componentState.catDetectionJob.set(null);
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+    expect(componentState.catDetectionError()).toBe('无法查看猫检测。');
+
+    api.detectionJobForCamera = jest.fn()
+      .mockReturnValueOnce(of(detectionJob()))
+      .mockReturnValueOnce(of(detectionJob({
+        status: 'stopped',
+        message: 'Detection provider stopped.',
+      })));
+    componentState.setCatDetectionEnabled(true);
+    tick(40);
+    expect(componentState.catDetectionError()).toBe('猫检测已停止。');
+    discardPeriodicTasks();
+  }));
+
+  it('ignores old-profile discovery that completes before live stop during a profile switch', fakeAsync(() => {
+    const oldProfileDiscovery$ = new Subject<HarborAssistantDetectionJobResponse>();
+    const stopSubject$ = new Subject<HarborAssistantCameraLiveSessionResponse>();
+    api.detectionJobForCamera = jest.fn((_deviceId: string, profile: string) => (profile === 'sub'
+      ? oldProfileDiscovery$.asObservable()
+      : of(detectionJob({ stream_profile: 'main' }))));
+    api.stopCameraLiveSession = jest.fn(() => stopSubject$.asObservable());
+    api.startCameraLiveSession = jest.fn((_deviceId: string, profile: string) => of(liveSession({
+      session_id: `live-${profile}`,
+      stream_profile: profile,
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionEnabled: () => boolean;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      markHlsPlaybackReady: () => void;
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveSession.set(liveSession({ session_id: 'live-sub', stream_profile: 'sub' }));
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+    api.startCameraLiveSession.mockClear();
+
+    spectator.component.selectStreamProfile('main');
+
+    expect(componentState.catDetectionEnabled()).toBe(false);
+    expect(componentState.catDetectionJob()).toBeNull();
+    expect(api.startCameraLiveSession).not.toHaveBeenCalled();
+    oldProfileDiscovery$.next(detectionJob({ stream_profile: 'sub' }));
+    expect(componentState.catDetectionJob()).toBeNull();
+
+    stopSubject$.next(liveSession({ session_id: 'live-sub', status: 'stopped' }));
+    stopSubject$.complete();
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'main');
+    componentState.markHlsPlaybackReady();
+    expect(api.detectionJobForCamera).toHaveBeenLastCalledWith('cam-1', 'main');
+    componentState.setCatDetectionEnabled(false);
+    discardPeriodicTasks();
+  }));
+
+  it('ignores old-profile discovery that completes after live stop during a profile switch', fakeAsync(() => {
+    const oldProfileDiscovery$ = new Subject<HarborAssistantDetectionJobResponse>();
+    const stopSubject$ = new Subject<HarborAssistantCameraLiveSessionResponse>();
+    api.detectionJobForCamera = jest.fn((_deviceId: string, profile: string) => (profile === 'sub'
+      ? oldProfileDiscovery$.asObservable()
+      : of(detectionJob({ stream_profile: 'main' }))));
+    api.stopCameraLiveSession = jest.fn(() => stopSubject$.asObservable());
+    api.startCameraLiveSession = jest.fn((_deviceId: string, profile: string) => of(liveSession({
+      session_id: `live-${profile}`,
+      stream_profile: profile,
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      catDetectionEnabled: () => boolean;
+      catDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      markHlsPlaybackReady: () => void;
+      setCatDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.hlsLiveSession.set(liveSession({ session_id: 'live-sub', stream_profile: 'sub' }));
+    componentState.hlsLiveStatus.set('live');
+    componentState.setCatDetectionEnabled(true);
+    api.startCameraLiveSession.mockClear();
+
+    spectator.component.selectStreamProfile('main');
+    stopSubject$.next(liveSession({ session_id: 'live-sub', status: 'stopped' }));
+    stopSubject$.complete();
+
+    expect(api.startCameraLiveSession).toHaveBeenCalledWith('cam-1', 'main');
+    expect(componentState.catDetectionJob()).toBeNull();
+    oldProfileDiscovery$.next(detectionJob({ stream_profile: 'sub' }));
+    expect(componentState.catDetectionJob()).toBeNull();
+    componentState.markHlsPlaybackReady();
+    expect(api.detectionJobForCamera).toHaveBeenLastCalledWith('cam-1', 'main');
+    componentState.setCatDetectionEnabled(false);
+    discardPeriodicTasks();
+  }));
+
   it('treats an absent stale live session as a confirmed stop during profile switching', fakeAsync(() => {
     api.stopCameraLiveSession = jest.fn(() => throwError(() => Object.assign(new Error('session absent'), {
       error: { code: 'MEDIA_SESSION_NOT_FOUND' },
@@ -1273,12 +1445,12 @@ describe('Harbor Assistant camera component', () => {
     componentState.catDetectionEnabled.set(true);
     componentState.catDetectionRequestedEnabled = true;
     componentState.catDetectionJob.set(detectionJob({ managed_by_live: true, stream_profile: 'sub' }));
-    api.startDetectionJob?.mockClear();
+    api.detectionJobForCamera.mockClear();
 
     spectator.component.selectStreamProfile('main');
     componentState.markHlsPlaybackReady();
 
-    expect(api.startDetectionJob).toHaveBeenCalledWith('cam-1', 'main');
+    expect(api.detectionJobForCamera).toHaveBeenCalledWith('cam-1', 'main');
     discardPeriodicTasks();
   }));
 

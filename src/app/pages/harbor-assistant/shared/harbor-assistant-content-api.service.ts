@@ -1,16 +1,17 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, Injector, inject } from '@angular/core';
 import { Observable, defer, map, switchMap } from 'rxjs';
-import { WINDOW } from 'app/helpers/window.helper';
 import { AuthService } from 'app/modules/auth/auth.service';
 import {
   harborAssistantBeaconApiUrl,
+  harborAssistantDetectionObservationRequest,
   harborAssistantGateApiUrl,
   harborAssistantGateRequiresUserToken,
 } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 import { harborAssistantPreviewUrl } from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantCatDetectionObservation,
   HarborAssistantConversationDetail,
   HarborAssistantConversationListResponse,
   HarborAssistantConversationSettings,
@@ -36,7 +37,6 @@ interface HarborAssistantAuthenticatedRequestOptions {
 export class HarborAssistantContentApiService {
   private readonly http = inject(HttpClient);
   private readonly injector = inject(Injector);
-  private readonly window = inject<Window>(WINDOW);
   private readonly requestIdSeed = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   private requestSequence = 0;
 
@@ -214,56 +214,25 @@ export class HarborAssistantContentApiService {
     );
   }
 
-  startDetectionJob(
+  detectionJobForCamera(
     deviceId: string,
     streamProfile: 'sub' | 'main',
-  ): Observable<HarborAssistantDetectionJobResponse> {
-    return this.http.post<HarborAssistantDetectionJobResponse>(
-      this.apiUrl('/vision/detection-jobs'),
+  ): Observable<HarborAssistantCatDetectionObservation> {
+    const request = harborAssistantDetectionObservationRequest(deviceId, streamProfile);
+    return this.withUserToken((options) => this.http.get<HarborAssistantCatDetectionObservation>(
+      request.url,
       {
-        camera_id: deviceId,
-        target_labels: ['cat'],
-        duration_seconds: 300,
-        max_fps: 25,
-        confidence: 0.50,
-        stream_profile: streamProfile,
+        ...options,
+        params: request.params,
       },
-      this.mutationOptions('detection-start', deviceId),
-    );
+    ));
   }
 
   detectionJob(jobId: string): Observable<HarborAssistantDetectionJobResponse> {
-    return this.http.get<HarborAssistantDetectionJobResponse>(
-      this.apiUrl(`/vision/detection-jobs/${encodeURIComponent(jobId)}`),
-    );
-  }
-
-  renewDetectionJob(
-    jobId: string,
-    ttlSeconds = 300,
-  ): Observable<HarborAssistantDetectionJobResponse> {
-    return this.http.post<HarborAssistantDetectionJobResponse>(
-      this.apiUrl(`/vision/detection-jobs/${encodeURIComponent(jobId)}/renew`),
-      { ttl_seconds: ttlSeconds },
-      this.mutationOptions('detection-renew', jobId),
-    );
-  }
-
-  stopDetectionJob(jobId: string): Observable<HarborAssistantDetectionJobResponse> {
-    return this.http.delete<HarborAssistantDetectionJobResponse>(
-      this.apiUrl(`/vision/detection-jobs/${encodeURIComponent(jobId)}`),
-      this.mutationOptions('detection-stop', jobId),
-    );
-  }
-
-  stopDetectionJobOnPageExit(jobId: string): void {
-    this.window.fetch(
-      this.apiUrl(`/vision/detection-jobs/${encodeURIComponent(jobId)}`),
-      {
-        keepalive: true,
-        method: 'DELETE',
-      },
-    ).catch((): void => undefined);
+    return this.withUserToken((options) => this.http.get<HarborAssistantDetectionJobResponse>(
+      this.gateApiUrl(`/vision/detection-jobs/${encodeURIComponent(jobId)}`),
+      options,
+    ));
   }
 
   createSnapshotTask(

@@ -9,3 +9,15 @@ export function harborAssistantGateApiUrl(path: string): string {
 export function harborAssistantGateRequiresUserToken(): boolean {
   return false;
 }
+
+export function harborAssistantDetectionObservationRequest(
+  deviceId: string,
+  streamProfile: 'sub' | 'main',
+): { url: string; params: Record<string, string> } {
+  return {
+    url: harborAssistantBeaconApiUrl(
+      `/cameras/${encodeURIComponent(deviceId)}/cat-detection/observation`,
+    ),
+    params: { stream_profile: streamProfile },
+  };
+}
