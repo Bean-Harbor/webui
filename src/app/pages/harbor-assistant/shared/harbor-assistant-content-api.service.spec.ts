@@ -497,12 +497,14 @@ describe('Harbor Assistant content API service', () => {
     });
   });
 
-  it('keeps HarborNavi cat observation on the direct read-only Beacon path', () => {
+  it('keeps HarborNavi cat observation on the camera-scoped Gate path', () => {
     expect(harborNaviDetectionObservationRequest('camera/main', 'sub')).toEqual({
-      url: '/api/beacon/cameras/camera%2Fmain/cat-detection/observation',
+      url: '/api/harbor-gate/api/beacon/cameras/camera%2Fmain/cat-detection/observation',
       params: { stream_profile: 'sub' },
     });
-    expect(harborNaviGateApiUrl('/vision/detection-jobs')).toBe('/api/beacon/vision/detection-jobs');
+    expect(harborNaviGateApiUrl('/vision/detection-jobs')).toBe(
+      '/api/harbor-gate/api/beacon/vision/detection-jobs',
+    );
     expect(harborNaviGateRequiresUserToken()).toBe(false);
   });
 });

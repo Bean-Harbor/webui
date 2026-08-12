@@ -687,7 +687,7 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it('polls cat observation by camera and profile every 40 ms', fakeAsync(() => {
+  it('polls cat observation by camera and profile every 250 ms', fakeAsync(() => {
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
       hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
@@ -699,7 +699,7 @@ describe('Harbor Assistant camera component', () => {
 
     expect(api.detectionJobForCamera).toHaveBeenCalledTimes(1);
     expect(api.detectionJob).not.toHaveBeenCalled();
-    tick(39);
+    tick(249);
     expect(api.detectionJobForCamera).toHaveBeenCalledTimes(1);
     tick(1);
     expect(api.detectionJobForCamera).toHaveBeenCalledTimes(2);
@@ -821,7 +821,7 @@ describe('Harbor Assistant camera component', () => {
     componentState.hlsLiveStatus.set('live');
     componentState.setCatDetectionEnabled(true);
 
-    tick(40);
+    tick(250);
 
     expect(componentState.catDetectionEnabled()).toBe(false);
     expect(componentState.catDetectionJob()).toBeNull();
@@ -873,7 +873,7 @@ describe('Harbor Assistant camera component', () => {
     componentState.hlsLiveStatus.set('live');
     componentState.setCatDetectionEnabled(true);
 
-    tick(40);
+    tick(250);
 
     expect(componentState.catDetectionEnabled()).toBe(false);
     expect(componentState.catDetectionJob()).toBeNull();
@@ -940,11 +940,11 @@ describe('Harbor Assistant camera component', () => {
     expect(strokeRect).toHaveBeenCalled();
     strokeRect.mockClear();
     monotonicNow = 1_601;
-    tick(40);
+    tick(250);
     expect(strokeRect).not.toHaveBeenCalled();
 
     monotonicNow = 1_602;
-    tick(40);
+    tick(250);
     expect(strokeRect).toHaveBeenCalled();
     componentState.setCatDetectionEnabled(false);
     discardPeriodicTasks();
@@ -997,7 +997,7 @@ describe('Harbor Assistant camera component', () => {
 
       strokeRect.mockClear();
       localNow = 1_601;
-      tick(40);
+      tick(250);
 
       expect(strokeRect).not.toHaveBeenCalled();
     } finally {
@@ -1257,7 +1257,7 @@ describe('Harbor Assistant camera component', () => {
         message: 'Detection provider stopped.',
       })));
     componentState.setCatDetectionEnabled(true);
-    tick(40);
+    tick(250);
     expect(componentState.catDetectionError()).toBe('猫检测已停止。');
     discardPeriodicTasks();
   }));

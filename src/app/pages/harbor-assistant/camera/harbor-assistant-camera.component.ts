@@ -300,7 +300,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly liveTransitionPaintDelayMs = 32;
   private readonly recordingFinalizationPollDelayMs = 1_000;
   private readonly recordingFinalizationPollLimit = 8;
-  private readonly catDetectionPollIntervalMs = 40;
+  private readonly catDetectionPollIntervalMs = 250;
   private readonly catDetectionResultMaxAgeMs = 1_500;
   private readonly liveStopTimeoutMs = 5_000;
 

@@ -6772,5 +6772,11 @@
   "The current model is still serving requests.": "The current model is still serving requests.",
   "The requested model could not be activated.": "The requested model could not be activated.",
   "Thinking": "Thinking",
-  "You": "You"
+  "You": "You",
+  "Device Pairing": "Device Pairing",
+  "Pairing Code": "Pairing Code",
+  "Enter a pairing code.": "Enter a pairing code.",
+  "Pairing code is invalid or expired.": "Pairing code is invalid or expired.",
+  "Pairing...": "Pairing...",
+  "Pair Device": "Pair Device"
 }

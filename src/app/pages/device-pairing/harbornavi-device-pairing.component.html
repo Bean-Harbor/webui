@@ -1,0 +1,31 @@
+<main class="pairing-shell">
+  <section class="pairing-panel" aria-labelledby="pairing-title">
+    <div class="brand-mark" aria-hidden="true">H</div>
+    <p class="product-name">HarborNavi</p>
+    <h1 id="pairing-title">{{ 'Device Pairing' | translate }}</h1>
+
+    <form [formGroup]="form" (ngSubmit)="pair()">
+      <mat-form-field appearance="outline">
+        <mat-label>{{ 'Pairing Code' | translate }}</mat-label>
+        <input
+          matInput
+          formControlName="pairingCode"
+          autocomplete="one-time-code"
+          spellcheck="false"
+          autofocus
+        />
+        @if (form.controls.pairingCode.touched && form.controls.pairingCode.invalid) {
+          <mat-error>{{ 'Enter a pairing code.' | translate }}</mat-error>
+        }
+      </mat-form-field>
+
+      @if (error()) {
+        <p class="pairing-error" role="alert">{{ error() | translate }}</p>
+      }
+
+      <button mat-flat-button color="primary" type="submit" [disabled]="busy()">
+        {{ (busy() ? 'Pairing...' : 'Pair Device') | translate }}
+      </button>
+    </form>
+  </section>
+</main>
