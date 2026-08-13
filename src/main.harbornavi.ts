@@ -1,6 +1,6 @@
 import { OVERLAY_DEFAULT_CONFIG } from '@angular/cdk/overlay';
 import {
-  provideHttpClient, withInterceptors, withInterceptorsFromDi, HttpClient,
+  provideHttpClient, withInterceptorsFromDi, HttpClient,
 } from '@angular/common/http';
 import {
   enableProdMode, importProvidersFrom, inject, provideAppInitializer,
@@ -39,7 +39,6 @@ import { defaultLanguage } from 'app/constants/languages.constant';
 import { WINDOW, getWindow } from 'app/helpers/window.helper';
 import { IcuMissingTranslationHandler } from 'app/modules/language/translations/icu-missing-translation-handler';
 import { createTranslateLoader } from 'app/modules/language/translations/icu-translations-loader';
-import { harborNaviDeviceSessionInterceptor } from 'app/pages/device-pairing/harbornavi-device-session.interceptor';
 import { CustomRouterStateSerializer } from 'app/store/router/custom-router-serializer';
 
 if (environment.production) {
@@ -116,7 +115,6 @@ bootstrapApplication(AppComponent, {
     provideCharts(withDefaultRegisterables()),
     provideHttpClient(
       withInterceptorsFromDi(),
-      withInterceptors([harborNaviDeviceSessionInterceptor]),
     ),
     provideRouter(
       rootRoutes,

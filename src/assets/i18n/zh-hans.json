@@ -6792,11 +6792,5 @@
   "Switching": "正在切换",
   "Switching to": "正在切换到",
   "The current model is still serving requests.": "当前模型仍在处理请求。",
-  "The requested model could not be activated.": "无法启用请求的模型。",
-  "Device Pairing": "设备配对",
-  "Pairing Code": "配对码",
-  "Enter a pairing code.": "请输入配对码。",
-  "Pairing code is invalid or expired.": "配对码无效或已过期。",
-  "Pairing...": "正在配对...",
-  "Pair Device": "配对"
+  "The requested model could not be activated.": "无法启用请求的模型。"
 }
