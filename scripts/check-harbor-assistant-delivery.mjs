@@ -49,14 +49,19 @@ if (!buildConfig) {
 
 const harbornaviRoutes = read('src/app/app.routes.harbornavi.ts');
 const harbornaviMain = read('src/main.harbornavi.ts');
-for (const forbidden of ['AuthGuard', 'WebSocketConnectionGuard', 'SigninComponent', 'PingService', 'ApiService', 'rootEffects', 'ServiceWorkerService', '/api/current', '192.168.3.82']) {
-  if (harbornaviRoutes.includes(forbidden) || harbornaviMain.includes(forbidden)) {
+const harbornaviApp = read('src/app/app.component.harbornavi.ts');
+for (const forbidden of ['AuthGuard', 'WebSocketConnectionGuard', 'SigninComponent', 'PingService', 'ApiService', 'provideEffects', 'rootEffects', 'ServiceWorkerService', '/api/current', '192.168.3.82']) {
+  if (harbornaviRoutes.includes(forbidden) || harbornaviMain.includes(forbidden) || harbornaviApp.includes(forbidden)) {
     fail(`HarborNavi app profile must not depend on ${forbidden}.`);
   }
 }
 
-if (!includes('src/app/pages/harbor-assistant/services/harbor-assistant-api-prefix.harbornavi.ts', '/api/beacon')) {
-  fail('HarborNavi API prefix must use /api/beacon.');
+const harborNaviApiPrefixPath = 'src/app/pages/harbor-assistant/services/harbor-assistant-api-prefix.harbornavi.ts';
+if (!includes(harborNaviApiPrefixPath, 'return `/api/beacon${path}`')) {
+  fail('HarborNavi API prefix must use the direct same-origin Beacon proxy.');
+}
+if (!includes(harborNaviApiPrefixPath, 'return false;')) {
+  fail('HarborNavi direct Beacon requests must not request a HarborOS user token.');
 }
 
 const assistantComponent = read('src/app/pages/harbor-assistant/harbor-assistant.component.ts');
@@ -93,6 +98,16 @@ for (const required of [
 ]) {
   if (!packaging.includes(required)) {
     fail(`HarborNavi package script missing: ${required}`);
+  }
+}
+
+const harbornaviDocs = read('docs/harbornavi-k3-webui.md');
+if (!harbornaviDocs.includes('bypasses the TrueNAS middleware websocket')) {
+  fail('HarborNavi documentation must describe the direct Assistant access mode.');
+}
+for (const forbidden of ['auth.generate_token', 'supported `/signin` and user-token flow']) {
+  if (harbornaviDocs.includes(forbidden)) {
+    fail(`HarborNavi direct-access documentation must not require ${forbidden}.`);
   }
 }
 

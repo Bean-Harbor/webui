@@ -1,5 +1,7 @@
 import { OVERLAY_DEFAULT_CONFIG } from '@angular/cdk/overlay';
-import { provideHttpClient, withInterceptorsFromDi, HttpClient } from '@angular/common/http';
+import {
+  provideHttpClient, withInterceptorsFromDi, HttpClient,
+} from '@angular/common/http';
 import {
   enableProdMode, importProvidersFrom, inject, provideAppInitializer,
 } from '@angular/core';
@@ -111,7 +113,9 @@ bootstrapApplication(AppComponent, {
       return spriteLoader.ensureSpriteLoaded();
     }),
     provideCharts(withDefaultRegisterables()),
-    provideHttpClient(withInterceptorsFromDi()),
+    provideHttpClient(
+      withInterceptorsFromDi(),
+    ),
     provideRouter(
       rootRoutes,
       withPreloading(PreloadAllModules),

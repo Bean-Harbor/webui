@@ -9,3 +9,16 @@ export function harborAssistantGateApiUrl(path: string): string {
 export function harborAssistantGateRequiresUserToken(): boolean {
   return true;
 }
+
+export function harborAssistantDetectionObservationRequest(
+  deviceId: string,
+  streamProfile: 'sub' | 'main',
+): { url: string; params: Record<string, string> } {
+  return {
+    url: harborAssistantGateApiUrl('/vision/detection-jobs'),
+    params: {
+      camera_id: deviceId,
+      stream_profile: streamProfile,
+    },
+  };
+}

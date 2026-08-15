@@ -1,9 +1,11 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { Title } from '@angular/platform-browser';
 import { RouterOutlet } from '@angular/router';
-import { LanguageService } from 'app/modules/language/language.service';
 import { WINDOW } from 'app/helpers/window.helper';
+import { LanguageService } from 'app/modules/language/language.service';
 
+// The HarborNavi build variant intentionally mirrors app.component.ts.
+// eslint-disable-next-line angular-file-naming/component-filename-suffix
 @Component({
   selector: 'ix-root',
   template: '<router-outlet></router-outlet>',

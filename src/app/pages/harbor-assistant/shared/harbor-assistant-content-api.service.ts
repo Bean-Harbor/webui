@@ -4,15 +4,18 @@ import { Observable, defer, map, switchMap } from 'rxjs';
 import { AuthService } from 'app/modules/auth/auth.service';
 import {
   harborAssistantBeaconApiUrl,
+  harborAssistantDetectionObservationRequest,
   harborAssistantGateApiUrl,
   harborAssistantGateRequiresUserToken,
 } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 import { harborAssistantPreviewUrl } from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantCatDetectionObservation,
   HarborAssistantConversationDetail,
   HarborAssistantConversationListResponse,
   HarborAssistantConversationSettings,
+  HarborAssistantDetectionJobResponse,
   HarborAssistantKnowledgeAnswerResponse,
   HarborAssistantKnowledgeSuggestionsResponse,
   HarborAssistantRetrievalSettings,
@@ -209,6 +212,27 @@ export class HarborAssistantContentApiService {
     return this.http.get<HarborAssistantHarborLinkCapabilitiesResponse>(
       this.apiUrl('/harbor-link/capabilities'),
     );
+  }
+
+  detectionJobForCamera(
+    deviceId: string,
+    streamProfile: 'sub' | 'main',
+  ): Observable<HarborAssistantCatDetectionObservation> {
+    const request = harborAssistantDetectionObservationRequest(deviceId, streamProfile);
+    return this.withUserToken((options) => this.http.get<HarborAssistantCatDetectionObservation>(
+      request.url,
+      {
+        ...options,
+        params: request.params,
+      },
+    ));
+  }
+
+  detectionJob(jobId: string): Observable<HarborAssistantDetectionJobResponse> {
+    return this.withUserToken((options) => this.http.get<HarborAssistantDetectionJobResponse>(
+      this.gateApiUrl(`/vision/detection-jobs/${encodeURIComponent(jobId)}`),
+      options,
+    ));
   }
 
   createSnapshotTask(

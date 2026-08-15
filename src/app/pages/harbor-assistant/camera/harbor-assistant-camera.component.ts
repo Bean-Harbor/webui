@@ -7,11 +7,12 @@ import { MatButtonToggle, MatButtonToggleGroup } from '@angular/material/button-
 import { MatCard, MatCardContent } from '@angular/material/card';
 import { MatDialog } from '@angular/material/dialog';
 import { MatProgressBar } from '@angular/material/progress-bar';
+import { MatSlideToggle } from '@angular/material/slide-toggle';
 import { MatTab, MatTabGroup } from '@angular/material/tabs';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
 import Hls from 'hls.js';
-import { forkJoin, fromEvent, Observable, of, timer } from 'rxjs';
-import { catchError, finalize, retry, shareReplay, switchMap, tap } from 'rxjs/operators';
+import { forkJoin, fromEvent, Observable, of, throwError, TimeoutError, timer } from 'rxjs';
+import { catchError, finalize, retry, shareReplay, switchMap, tap, timeout as rxTimeout } from 'rxjs/operators';
 import { WINDOW } from 'app/helpers/window.helper';
 import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
@@ -30,6 +31,8 @@ import {
 } from 'app/pages/harbor-assistant/shared/harbor-assistant-time-range-dialog.component';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantCatDetectionObservation,
+  HarborAssistantDetectionResult,
   HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
   HarborAssistantSearchResultFilter,
@@ -100,6 +103,7 @@ interface HarborAssistantSearchMediaItem extends HarborAssistantSearchDvrTimelin
     MatCard,
     MatCardContent,
     MatProgressBar,
+    MatSlideToggle,
     MatTab,
     MatTabGroup,
     HarborAssistantLiveControlsComponent,
@@ -114,6 +118,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly window = inject<Window>(WINDOW);
   @ViewChild('liveImage') private liveImage?: ElementRef<HTMLImageElement>;
   @ViewChild('liveTransitionFrame') private liveTransitionFrame?: ElementRef<HTMLCanvasElement>;
+  @ViewChild('catDetectionOverlay') private catDetectionOverlay?: ElementRef<HTMLCanvasElement>;
   @ViewChild('liveVideo') private liveVideo?: ElementRef<HTMLVideoElement>;
   @ViewChild('playbackVideo') private playbackVideo?: ElementRef<HTMLVideoElement>;
   @ViewChild('mediaViewer') private mediaViewer?: ElementRef<HTMLElement>;
@@ -189,10 +194,15 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   protected readonly liveControlStartTime = signal(0);
   protected readonly liveControlVolume = signal(1);
   protected readonly liveTransitionFrameVisible = signal(false);
+  protected readonly liveStreamSwitching = signal(false);
   protected readonly selectedStreamProfile = signal<HarborAssistantLiveStreamProfile>('sub');
   protected readonly actionBusy = signal<string | null>(null);
   protected readonly actionMessage = signal<string | null>(null);
   protected readonly actionError = signal<string | null>(null);
+  protected readonly catDetectionBusy = signal(false);
+  protected readonly catDetectionEnabled = signal(false);
+  protected readonly catDetectionError = signal<string | null>(null);
+  protected readonly catDetectionJob = signal<HarborAssistantCatDetectionObservation | null>(null);
   protected readonly mediaLibraryExpanded = signal(true);
   protected readonly selectedMediaItem = signal<HarborAssistantSearchMediaItem | null>(null);
   protected readonly selectedTabIndex = signal(0);
@@ -204,11 +214,22 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private liveFeedbackToken = 0;
   private recordingFinalizationAttempts = 0;
   private recordingFinalizationTimer: number | null = null;
+  private catDetectionPollTimer: number | null = null;
+  private catDetectionResultReceivedAtMs: number | null = null;
+  private catDetectionResultSequence: number | null = null;
+  private catDetectionToken = 0;
+  private catDetectionRequestedEnabled = false;
   private hlsAttachToken = 0;
   private hlsPlaybackToken = 0;
   private hlsWarmToken = 0;
   private hlsWarmTimer: number | null = null;
   private liveSessionRenewTimer: number | null = null;
+  private livePendingStartStopTimer: number | null = null;
+  private liveStopPending = false;
+  private liveStopUnconfirmed = false;
+  private liveStreamSwitchTarget: HarborAssistantLiveStreamProfile | null = null;
+  private liveStreamSwitchRestoreCatDetection = false;
+  private destroyed = false;
   private hlsWarmSession: HarborAssistantCameraLiveSessionResponse | null = null;
   private hlsWarmStartRequest: HarborAssistantHlsWarmStartRequest | null = null;
   private hlsRecoveryAttempts = 0;
@@ -279,9 +300,15 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly liveTransitionPaintDelayMs = 32;
   private readonly recordingFinalizationPollDelayMs = 1_000;
   private readonly recordingFinalizationPollLimit = 8;
+  private readonly catDetectionPollIntervalMs = 250;
+  private readonly catDetectionResultMaxAgeMs = 1_500;
+  private readonly liveStopTimeoutMs = 5_000;
 
   ngOnInit(): void {
     this.refreshCameraDvr();
+    fromEvent(this.window, 'pagehide').pipe(
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe(() => this.stopCatDetectionOnPageExit());
     fromEvent(document, 'visibilitychange').pipe(
       takeUntilDestroyed(this.destroyRef),
     ).subscribe(() => this.handleLiveDocumentVisibilityChange());
@@ -425,13 +452,49 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (profile === this.selectedStreamProfile()) {
       return;
     }
-    if (this.hlsLiveStatus() === 'live' || this.hlsLiveStatus() === 'starting') {
-      this.stopLive(false);
-      this.showLiveFeedback('Stream changed. Press Play live to start it.', 1800);
+    if (this.liveStreamSwitching() || this.hlsLiveStatus() === 'starting') {
+      return;
+    }
+    if (this.hlsLiveStatus() === 'live') {
+      this.switchLiveStreamProfile(profile);
+      return;
     }
     this.stopHlsWarmSession();
     this.selectedStreamProfile.set(profile);
     this.scheduleHlsLivePrewarm();
+  }
+
+  private switchLiveStreamProfile(profile: HarborAssistantLiveStreamProfile): void {
+    const session = this.hlsLiveSession();
+    const deviceId = session?.device_id ?? this.selectedCameraId();
+    if (!deviceId || !session?.session_id) {
+      return;
+    }
+
+    this.stopHlsWarmSession();
+    this.beginLiveTransportTransition('webrtc');
+    this.liveStreamSwitchTarget = profile;
+    this.liveStreamSwitching.set(true);
+    this.liveStreamSwitchRestoreCatDetection = this.catDetectionRequestedEnabled || this.catDetectionEnabled();
+    this.selectedStreamProfile.set(profile);
+    this.showLiveFeedback(`Switching to ${profile} stream...`, 1800);
+    this.stopCatDetection();
+    this.hlsAttachToken += 1;
+    this.hlsPlaybackToken += 1;
+    this.hlsRecoveryAttempts = 0;
+    this.clearLiveSessionRenewTimer();
+    this.resetLivePlaybackUserPause();
+    this.stopWebRtcPlayback();
+    this.stopHlsPlayback();
+    this.resetLiveControlTimeline();
+    this.hlsLiveUrl.set(null);
+    this.liveControlPlaybackMode.set('hls-fallback');
+    this.hlsLiveStatus.set('starting');
+    this.hlsLiveError.set(null);
+    this.hlsLiveSession.set(null);
+    this.actionBusy.set('live');
+    this.liveStopPending = true;
+    this.requestLiveSessionStop(deviceId, session.session_id, false);
   }
 
   usePromptSuggestion(suggestion: HarborAssistantSearchPromptSuggestion): void {
@@ -681,16 +744,258 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     });
   }
 
+  catDetectionCanStart(): boolean {
+    return Boolean(this.selectedCameraId())
+      && this.hlsLiveStatus() === 'live';
+  }
+
+  catDetectionStatusLabel(): string {
+    if (this.catDetectionBusy()) {
+      return this.translate.instant(this.catDetectionJob() ? 'Stopping detection...' : 'Starting detection...');
+    }
+    const job = this.catDetectionJob();
+    const result = job?.latest_result;
+    const provider = result?.provider ?? job?.metrics?.provider ?? '';
+    let device: 'CPU' | 'NPU' | null = null;
+    if (provider.includes('SpaceMIT') || provider === 'spacemit') {
+      device = 'NPU';
+    } else if (provider === 'CPUExecutionProvider') {
+      device = 'CPU';
+    }
+    if (!result) {
+      return device ?? this.translate.instant('Waiting for first result...');
+    }
+    const cats = this.translate.instant('{count, plural, one {# cat} other {# cats}}', {
+      count: result.detection_count,
+    });
+    return `${device ?? this.translate.instant('Provider unknown')} · ${result.inference_ms} ms · ${cats}`;
+  }
+
+  setCatDetectionEnabled(enabled: boolean): void {
+    this.catDetectionRequestedEnabled = enabled;
+    if (enabled) {
+      this.startCatDetection();
+      return;
+    }
+    this.stopCatDetection();
+  }
+
+  private startCatDetection(): void {
+    const deviceId = this.selectedCameraId();
+    if (
+      !deviceId
+      || !this.catDetectionCanStart()
+      || this.catDetectionBusy()
+      || this.catDetectionEnabled()
+      || this.catDetectionJob()
+    ) {
+      return;
+    }
+
+    const token = ++this.catDetectionToken;
+    this.catDetectionBusy.set(true);
+    this.catDetectionEnabled.set(true);
+    this.catDetectionError.set(null);
+    const streamProfile = this.selectedStreamProfile();
+    this.api.detectionJobForCamera(deviceId, streamProfile).pipe(
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (job) => {
+        if (
+          this.destroyed
+          || token !== this.catDetectionToken
+          || !this.catDetectionRequestedEnabled
+        ) {
+          return;
+        }
+        this.catDetectionBusy.set(false);
+        this.receiveCatDetectionJob(job);
+        this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
+      },
+      error: (error: unknown) => {
+        if (this.destroyed || token !== this.catDetectionToken) {
+          return;
+        }
+        this.stopCatDetection();
+        if (!this.detectionJobNotFound(error)) {
+          this.catDetectionError.set(this.translate.instant('Unable to observe cat detection.'));
+        }
+      },
+    });
+  }
+
+  private scheduleCatDetectionPoll(
+    deviceId: string,
+    streamProfile: 'sub' | 'main',
+    token: number,
+    delayMs = this.catDetectionPollIntervalMs,
+  ): void {
+    this.clearCatDetectionPollTimer();
+    this.catDetectionPollTimer = this.window.setTimeout(() => {
+      this.catDetectionPollTimer = null;
+      if (!this.catDetectionEnabled() || token !== this.catDetectionToken) {
+        return;
+      }
+      this.api.detectionJobForCamera(deviceId, streamProfile).pipe(
+        takeUntilDestroyed(this.destroyRef),
+      ).subscribe({
+        next: (job) => {
+          if (token !== this.catDetectionToken) {
+            return;
+          }
+          this.catDetectionError.set(null);
+          this.receiveCatDetectionJob(job);
+          if (job.status === 'running') {
+            this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
+            return;
+          }
+          this.stopCatDetection();
+          this.catDetectionError.set(this.translate.instant('Cat detection stopped.'));
+        },
+        error: (error: unknown) => {
+          if (token !== this.catDetectionToken) {
+            return;
+          }
+          if (this.detectionJobNotFound(error)) {
+            this.stopCatDetection();
+            return;
+          }
+          this.catDetectionError.set(this.translate.instant('Unable to observe cat detection.'));
+          this.clearCatDetectionOverlay();
+          this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
+        },
+      });
+    }, delayMs);
+  }
+
+  private stopCatDetection(): void {
+    this.catDetectionToken += 1;
+    this.catDetectionRequestedEnabled = false;
+    this.clearCatDetectionTimers();
+    this.catDetectionBusy.set(false);
+    this.catDetectionEnabled.set(false);
+    this.catDetectionError.set(null);
+    this.catDetectionJob.set(null);
+    this.catDetectionResultReceivedAtMs = null;
+    this.catDetectionResultSequence = null;
+    this.clearCatDetectionOverlay();
+  }
+
+  private stopCatDetectionOnPageExit(): void {
+    this.stopCatDetection();
+  }
+
+  private detectionJobNotFound(error: unknown): boolean {
+    return Boolean(error && typeof error === 'object' && 'status' in error && error.status === 404);
+  }
+
+  private clearCatDetectionTimers(): void {
+    this.clearCatDetectionPollTimer();
+  }
+
+  private clearCatDetectionPollTimer(): void {
+    if (this.catDetectionPollTimer === null) {
+      return;
+    }
+    this.window.clearTimeout(this.catDetectionPollTimer);
+    this.catDetectionPollTimer = null;
+  }
+
+  private receiveCatDetectionJob(job: HarborAssistantCatDetectionObservation): void {
+    const result = job.latest_result;
+    if (!result) {
+      this.catDetectionResultReceivedAtMs = null;
+      this.catDetectionResultSequence = null;
+    } else if (result.sequence !== this.catDetectionResultSequence) {
+      this.catDetectionResultSequence = result.sequence;
+      this.catDetectionResultReceivedAtMs = this.monotonicNow();
+    }
+    this.catDetectionJob.set(job);
+    this.drawCatDetectionOverlay(result);
+  }
+
+  private monotonicNow(): number {
+    if (typeof this.window.performance?.now === 'function') {
+      return this.window.performance.now();
+    }
+    return Date.now();
+  }
+
+  private drawCatDetectionOverlay(result: HarborAssistantDetectionResult | null | undefined): void {
+    const canvas = this.catDetectionOverlay?.nativeElement;
+    const video = this.liveVideo?.nativeElement;
+    if (!canvas || !video || video.videoWidth <= 0 || video.videoHeight <= 0) {
+      return;
+    }
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext('2d');
+    if (!context) {
+      return;
+    }
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    if (
+      !this.catDetectionEnabled()
+      || !result
+      || result.sequence !== this.catDetectionResultSequence
+      || this.catDetectionResultReceivedAtMs === null
+      || this.monotonicNow() - this.catDetectionResultReceivedAtMs > this.catDetectionResultMaxAgeMs
+    ) {
+      return;
+    }
+    context.font = `${Math.max(12, Math.round(canvas.width / 80))}px sans-serif`;
+    context.lineWidth = Math.max(2, canvas.width / 640);
+    context.strokeStyle = '#00dc50';
+    for (const detection of result.detections.filter((item) => item.label.toLowerCase() === 'cat')) {
+      const x = Math.max(0, detection.x1);
+      const y = Math.max(0, detection.y1);
+      const width = Math.max(0, Math.min(canvas.width, detection.x2) - x);
+      const height = Math.max(0, Math.min(canvas.height, detection.y2) - y);
+      context.strokeRect(x, y, width, height);
+      const label = `${this.translate.instant('Cat')} ${Math.round(detection.confidence * 100)}%`;
+      const labelWidth = context.measureText(label).width + 10;
+      const labelHeight = Math.max(18, Math.round(canvas.width / 64));
+      const labelY = Math.max(0, y - labelHeight);
+      context.fillStyle = 'rgba(0, 90, 36, 0.9)';
+      context.fillRect(x, labelY, labelWidth, labelHeight);
+      context.fillStyle = '#fff';
+      context.fillText(label, x + 5, labelY + labelHeight - 4);
+    }
+  }
+
+  private clearCatDetectionOverlay(): void {
+    const canvas = this.catDetectionOverlay?.nativeElement;
+    const context = canvas?.getContext('2d');
+    if (canvas && context) {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }
+
   startLive(): void {
     const deviceId = this.selectedCameraId();
-    if (!deviceId || this.actionBusy() === 'live' || this.hlsLiveStatus() === 'starting') {
+    if (
+      !deviceId
+      || this.destroyed
+      || this.actionBusy() === 'live'
+      || this.liveStopPending
+      || this.liveStopUnconfirmed
+      || this.catDetectionBusy()
+      || this.hlsLiveStatus() === 'starting'
+    ) {
       return;
     }
     if (this.hlsLiveSession()?.device_id && this.hlsLiveSession()?.device_id !== deviceId) {
       this.stopLive(false);
+      return;
     }
     this.actionBusy.set('live');
-    this.cancelLiveTransportTransition();
+    this.liveStopUnconfirmed = false;
+    this.clearLivePendingStartStopTimer();
+    if (this.liveStreamSwitching()) {
+      this.resetLiveTransitionRevealWait();
+    } else {
+      this.cancelLiveTransportTransition();
+    }
     this.hlsLiveStatus.set('starting');
     this.hlsLiveError.set(null);
     this.hlsLiveUrl.set(null);
@@ -723,14 +1028,27 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       : warmStartRequest$ ?? this.api.startCameraLiveSession(deviceId, streamProfile);
     this.refreshHarborLinkCapabilitiesForLive().pipe(
       switchMap(() => startRequest$),
-      takeUntilDestroyed(this.destroyRef),
       finalize(() => {
-        if (this.actionBusy() === 'live') {
+        if (!this.destroyed && this.actionBusy() === 'live' && !this.liveStopPending) {
           this.actionBusy.set(null);
         }
       }),
     ).subscribe({
       next: (session) => {
+        this.clearLivePendingStartStopTimer();
+        if (
+          this.destroyed
+          || this.liveStopPending
+          || this.liveStopUnconfirmed
+          || this.hlsLiveStatus() === 'stopped'
+        ) {
+          if (session.device_id && session.session_id) {
+            this.requestLiveSessionStop(session.device_id, session.session_id, false);
+          } else if (!this.destroyed) {
+            this.finishLiveStop(true);
+          }
+          return;
+        }
         this.applySessionStreamProfile(session);
         this.hlsLiveSession.set(session);
         if (session.session_id) {
@@ -754,12 +1072,22 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
           this.showLiveFeedback('Live is starting...', 1800);
           this.waitForHlsPlaylist(session);
         } else {
+          this.cancelLiveStreamProfileSwitch();
           this.hlsLiveStatus.set('degraded');
           this.hlsLiveError.set(session.message || 'Live view is unavailable.');
           this.showLiveFeedback('Live unavailable. Falling back to snapshots.', 2200);
         }
       },
       error: (error: unknown) => {
+        this.clearLivePendingStartStopTimer();
+        if (this.destroyed) {
+          return;
+        }
+        if (this.liveStopPending || this.liveStopUnconfirmed) {
+          this.finishLiveStop(true);
+          return;
+        }
+        this.cancelLiveStreamProfileSwitch();
         this.hlsLiveStatus.set('degraded');
         this.hlsLiveError.set(harborAssistantSearchErrorMessage(error));
         this.showLiveFeedback('Live unavailable. Falling back to snapshots.', 2200);
@@ -841,7 +1169,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private ensureHlsLivePrewarm(): void {
     const deviceId = this.selectedCameraId();
     const streamProfile = this.selectedStreamProfile();
-    if (!deviceId || this.selectedCamera()?.device_id !== deviceId || this.hlsLiveStatus() !== 'stopped') {
+    if (
+      !deviceId
+      || this.selectedCamera()?.device_id !== deviceId
+      || this.hlsLiveStatus() !== 'stopped'
+      || this.liveStopPending
+      || this.liveStopUnconfirmed
+    ) {
       return;
     }
     const warmSession = this.hlsWarmSession;
@@ -936,6 +1270,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const profile = this.normalizeLiveStreamProfile(session.stream_profile);
     return this.hlsWarmToken === token
       && this.hlsLiveStatus() === 'stopped'
+      && !this.liveStopPending
+      && !this.liveStopUnconfirmed
       && Boolean(session.session_id)
       && session.device_id === this.selectedCameraId()
       && profile === this.selectedStreamProfile();
@@ -1056,8 +1392,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   stopLive(showMessage = true): void {
+    this.cancelLiveStreamProfileSwitch();
     const session = this.hlsLiveSession();
     const deviceId = session?.device_id ?? this.selectedCameraId();
+    const wasStarting = this.hlsLiveStatus() === 'starting';
+    this.stopCatDetection();
     this.hlsAttachToken += 1;
     this.hlsPlaybackToken += 1;
     this.hlsRecoveryAttempts = 0;
@@ -1073,20 +1412,164 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.hlsLiveError.set(null);
     this.hlsLiveSession.set(null);
     if (!deviceId || !session?.session_id) {
+      if (wasStarting && this.actionBusy() === 'live') {
+        this.liveStopPending = true;
+        this.scheduleLivePendingStartStopTimeout();
+      }
       return;
     }
-    this.api.stopCameraLiveSession(deviceId, session.session_id).subscribe({
+    this.liveStopPending = true;
+    this.requestLiveSessionStop(deviceId, session.session_id, showMessage);
+  }
+
+  private requestLiveSessionStop(deviceId: string, sessionId: string, showMessage: boolean): void {
+    this.clearLivePendingStartStopTimer();
+    this.api.stopCameraLiveSession(deviceId, sessionId).pipe(
+      rxTimeout(this.liveStopTimeoutMs),
+      retry({
+        count: 1,
+        delay: (error) => {
+          return this.liveSessionAlreadyAbsent(error) ? throwError(() => error) : timer(0);
+        },
+      }),
+    ).subscribe({
       next: () => {
-        if (showMessage) {
+        if (!this.destroyed && showMessage) {
           this.showLiveFeedback('Live stopped.', 1200);
         }
+        this.finishLiveStop(true);
       },
-      error: () => {
-        if (showMessage) {
+      error: (error: unknown) => {
+        if (this.liveSessionAlreadyAbsent(error)) {
+          this.finishLiveStop(true);
+          return;
+        }
+        if (!this.destroyed && showMessage) {
           this.showLiveFeedback('Live stop was requested.', 1200);
         }
+        this.failLiveStop(error);
       },
     });
+  }
+
+  private finishLiveStop(confirmed: boolean): void {
+    this.clearLivePendingStartStopTimer();
+    this.liveStopPending = false;
+    this.liveStopUnconfirmed = !confirmed;
+    if (this.destroyed) {
+      return;
+    }
+    if (confirmed) {
+      this.hlsLiveError.set(null);
+    }
+    if (this.actionBusy() === 'live') {
+      this.actionBusy.set(null);
+    }
+    if (confirmed && this.liveStreamSwitching()) {
+      this.startPendingLiveStreamProfileSwitch();
+    }
+  }
+
+  private failLiveStop(error: unknown): void {
+    this.finishLiveStop(false);
+    this.cancelLiveStreamProfileSwitch();
+    if (this.destroyed) {
+      return;
+    }
+    const errorMessage = error instanceof TimeoutError
+      ? 'Live stop timed out'
+      : harborAssistantSearchErrorMessage(error);
+    this.hlsLiveError.set(`${errorMessage}; remote state is unconfirmed.`);
+  }
+
+  private startPendingLiveStreamProfileSwitch(): void {
+    const profile = this.liveStreamSwitchTarget;
+    if (!profile || this.destroyed) {
+      return;
+    }
+    this.hlsLiveStatus.set('stopped');
+    this.selectedStreamProfile.set(profile);
+    this.startLive();
+  }
+
+  private cancelLiveStreamProfileSwitch(): void {
+    const wasSwitching = this.liveStreamSwitching();
+    this.liveStreamSwitchTarget = null;
+    this.liveStreamSwitchRestoreCatDetection = false;
+    this.liveStreamSwitching.set(false);
+    if (wasSwitching) {
+      this.cancelLiveTransportTransition();
+    }
+  }
+
+  private completeLiveStreamProfileSwitch(): void {
+    const profile = this.liveStreamSwitchTarget;
+    if (
+      !this.liveStreamSwitching()
+      || !profile
+      || this.normalizeLiveStreamProfile(this.hlsLiveSession()?.stream_profile) !== profile
+    ) {
+      return;
+    }
+    const restoreCatDetection = this.liveStreamSwitchRestoreCatDetection;
+    this.liveStreamSwitchTarget = null;
+    this.liveStreamSwitchRestoreCatDetection = false;
+    this.liveStreamSwitching.set(false);
+    if (restoreCatDetection) {
+      this.catDetectionRequestedEnabled = true;
+      this.startCatDetection();
+    }
+  }
+
+  private liveSessionAlreadyAbsent(error: unknown): boolean {
+    if (!error || typeof error !== 'object' || !('status' in error) || error.status !== 404) {
+      return false;
+    }
+    const body = 'error' in error ? error.error : null;
+    return this.liveSessionErrorCode(body) === 'MEDIA_SESSION_NOT_FOUND';
+  }
+
+  private liveSessionErrorCode(value: unknown): string | null {
+    if (typeof value === 'string') {
+      try {
+        return this.liveSessionErrorCode(JSON.parse(value));
+      } catch {
+        return value.includes('MEDIA_SESSION_NOT_FOUND') ? 'MEDIA_SESSION_NOT_FOUND' : null;
+      }
+    }
+    if (!value || typeof value !== 'object') {
+      return null;
+    }
+    if ('code' in value && typeof value.code === 'string') {
+      return value.code;
+    }
+    return 'error' in value ? this.liveSessionErrorCode(value.error) : null;
+  }
+
+  private scheduleLivePendingStartStopTimeout(): void {
+    this.clearLivePendingStartStopTimer();
+    if (this.destroyed) {
+      return;
+    }
+    this.livePendingStartStopTimer = this.window.setTimeout(() => {
+      this.livePendingStartStopTimer = null;
+      if (!this.hlsLiveSession() && this.liveStopPending) {
+        this.liveStopPending = false;
+        this.liveStopUnconfirmed = true;
+        this.hlsLiveError.set('Live start cancellation timed out; remote state is unconfirmed.');
+        if (this.actionBusy() === 'live') {
+          this.actionBusy.set(null);
+        }
+      }
+    }, this.liveStopTimeoutMs);
+  }
+
+  private clearLivePendingStartStopTimer(): void {
+    if (this.livePendingStartStopTimer === null) {
+      return;
+    }
+    this.window.clearTimeout(this.livePendingStartStopTimer);
+    this.livePendingStartStopTimer = null;
   }
 
   liveModeLabel(): string {
@@ -1127,6 +1610,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   liveCanStart(): boolean {
     return Boolean(this.selectedCameraId())
       && this.actionBusy() !== 'live'
+      && !this.liveStopPending
+      && !this.liveStopUnconfirmed
+      && !this.liveStreamSwitching()
+      && !this.catDetectionBusy()
       && this.hlsLiveStatus() !== 'starting'
       && this.hlsLiveStatus() !== 'live';
   }
@@ -1176,6 +1663,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.markHlsPlaybackReady();
     this.resumeLivePlayback();
     this.scheduleLiveTransportFrameReveal();
+    this.drawCatDetectionOverlay(this.catDetectionJob()?.latest_result);
   }
 
   onLiveVideoPlaying(): void {
@@ -1194,6 +1682,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.syncLiveControlState();
     this.markHlsPlaybackReady();
     this.scheduleLiveTransportFrameReveal();
+    this.drawCatDetectionOverlay(this.catDetectionJob()?.latest_result);
   }
 
   onLiveVideoPause(): void {
@@ -1577,7 +2066,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (this.hlsLiveStatus() === 'stopped') {
       return null;
     }
-    if (this.hlsLiveUrl() && this.hlsLiveStatus() !== 'degraded') {
+    if (
+      (this.hlsLiveUrl() || this.webrtcLiveUrl())
+      && this.hlsLiveStatus() !== 'starting'
+      && this.hlsLiveStatus() !== 'degraded'
+    ) {
       return null;
     }
     const deviceId = this.selectedCameraId();
@@ -1645,6 +2138,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.destroyed = true;
+    this.clearLivePendingStartStopTimer();
     this.clearRecordingFinalizationTimer();
     this.stopHlsPlayback();
     this.stopLive(false);
@@ -1658,7 +2153,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   handleLiveLoad(event: Event): void {
     const image = event.target as HTMLImageElement | null;
-    if (!image || image.currentSrc.startsWith('data:')) {
+    if (!image) {
+      return;
+    }
+    if (image.currentSrc.startsWith('data:')) {
       return;
     }
     this.liveSnapshotErrorToken.set(null);
@@ -2587,6 +3085,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.livePlaybackBackgroundPaused = false;
     this.startLiveControlTimeline();
     this.syncLiveControlState();
+    this.completeLiveStreamProfileSwitch();
     this.scheduleLiveTransportFrameReveal();
     this.startLiveEdgeMonitor();
   }
@@ -2810,9 +3309,15 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private refreshHarborLinkCapabilitiesForLive(): Observable<HarborAssistantHarborLinkCapabilitiesResponse | null> {
     return this.api.harborLinkCapabilities().pipe(
-      tap((capabilities) => this.harborLinkCapabilities.set(capabilities)),
+      tap((capabilities) => {
+        if (!this.destroyed) {
+          this.harborLinkCapabilities.set(capabilities);
+        }
+      }),
       catchError(() => {
-        this.harborLinkCapabilities.set(null);
+        if (!this.destroyed) {
+          this.harborLinkCapabilities.set(null);
+        }
         return of(null);
       }),
     );
@@ -3047,6 +3552,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.clearHlsStartingAssetRetry();
     this.hlsLiveStatus.set('live');
     this.hlsLiveError.set(null);
+    this.completeLiveStreamProfileSwitch();
   }
 
   private recoverHlsPlayback(hls: Hls, data: { details?: unknown; type?: unknown }): boolean {
@@ -3245,15 +3751,17 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
 
-    const video = this.liveVideo?.nativeElement;
     const canvas = this.liveTransitionFrame?.nativeElement;
-    if (
-      !video
-      || !canvas
-      || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
-      || video.videoWidth <= 0
-      || video.videoHeight <= 0
-    ) {
+    const video = this.liveVideo?.nativeElement;
+    const image = this.liveImage?.nativeElement;
+    const videoReady = Boolean(
+      video
+      && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      && video.videoWidth > 0
+      && video.videoHeight > 0,
+    );
+    const imageReady = Boolean(image?.complete && image.naturalWidth > 0 && image.naturalHeight > 0);
+    if (!canvas || (!videoReady && !imageReady)) {
       this.liveTransitionTarget = null;
       return;
     }
@@ -3265,9 +3773,14 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
 
     try {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const source = videoReady ? video : image;
+      if (!source) {
+        this.liveTransitionTarget = null;
+        return;
+      }
+      canvas.width = videoReady ? video?.videoWidth ?? 0 : image?.naturalWidth ?? 0;
+      canvas.height = videoReady ? video?.videoHeight ?? 0 : image?.naturalHeight ?? 0;
+      context.drawImage(source, 0, 0, canvas.width, canvas.height);
       this.liveTransitionFrameVisible.set(true);
     } catch {
       this.liveTransitionTarget = null;

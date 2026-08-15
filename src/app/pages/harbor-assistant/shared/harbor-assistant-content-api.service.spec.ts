@@ -8,6 +8,11 @@ import {
 import { SpectatorService, createServiceFactory, mockProvider } from '@ngneat/spectator/jest';
 import { firstValueFrom, of } from 'rxjs';
 import { AuthService } from 'app/modules/auth/auth.service';
+import {
+  harborAssistantDetectionObservationRequest as harborNaviDetectionObservationRequest,
+  harborAssistantGateApiUrl as harborNaviGateApiUrl,
+  harborAssistantGateRequiresUserToken as harborNaviGateRequiresUserToken,
+} from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix.harbornavi';
 import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
 import {
   HarborAssistantSearchRequest,
@@ -406,6 +411,57 @@ describe('Harbor Assistant content API service', () => {
     await secondPromise;
   });
 
+  it('exposes detection observation without detection mutation APIs', () => {
+    const service = spectator.service as unknown as Record<string, unknown>;
+
+    expect(typeof service.detectionJobForCamera).toBe('function');
+    expect(typeof service.detectionJob).toBe('function');
+    expect(service.startDetectionJob).toBeUndefined();
+    expect(service.renewDetectionJob).toBeUndefined();
+    expect(service.stopDetectionJob).toBeUndefined();
+    expect(service.stopDetectionJobOnPageExit).toBeUndefined();
+  });
+
+  it('reads detection collection and item endpoints through the authenticated Gate path', async () => {
+    const discoveryPromise = firstValueFrom(
+      spectator.service.detectionJobForCamera('camera/main', 'sub'),
+    );
+    const discoveryRequest = httpMock.expectOne((request) => {
+      return request.url === '/api/harbor-gate/api/beacon/vision/detection-jobs'
+        && request.params.get('camera_id') === 'camera/main'
+        && request.params.get('stream_profile') === 'sub';
+    });
+    expect(discoveryRequest.request.method).toBe('GET');
+    expect(discoveryRequest.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
+    discoveryRequest.flush(detectionJob());
+    expect((await discoveryPromise).status).toBe('running');
+
+    const itemPromise = firstValueFrom(spectator.service.detectionJob('yolo/test'));
+    const itemRequest = httpMock.expectOne(
+      '/api/harbor-gate/api/beacon/vision/detection-jobs/yolo%2Ftest',
+    );
+    expect(itemRequest.request.method).toBe('GET');
+    expect(itemRequest.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
+    itemRequest.flush(detectionJob());
+    expect((await itemPromise).status).toBe('running');
+
+    expect(spectator.inject(AuthService).getHarborAssistantOneTimeToken).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the camera detection overlay free of engine ownership and mutation calls', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src/app/pages/harbor-assistant/camera/harbor-assistant-camera.component.ts'),
+      'utf8',
+    );
+
+    expect(source).toContain('this.api.detectionJobForCamera');
+    expect(source).not.toContain('startDetectionJob');
+    expect(source).not.toContain('renewDetectionJob');
+    expect(source).not.toContain('stopDetectionJob');
+    expect(source).not.toContain('stopDetectionJobOnPageExit');
+    expect(source).not.toContain('catDetectionOwnedJobId');
+  });
+
   it('uses same-origin Harbor Assistant proxy paths and avoids direct service ports', () => {
     const sources = [
       'src/app/pages/harbor-assistant/shared/harbor-assistant-content-api.service.ts',
@@ -441,15 +497,15 @@ describe('Harbor Assistant content API service', () => {
     });
   });
 
-  it('keeps the HarborNavi build on its direct Beacon path without HarborOS token generation', () => {
-    const source = readFileSync(
-      join(process.cwd(), 'src/app/pages/harbor-assistant/services/harbor-assistant-api-prefix.harbornavi.ts'),
-      'utf8',
+  it('keeps HarborNavi cat observation on the camera-scoped Gate path', () => {
+    expect(harborNaviDetectionObservationRequest('camera/main', 'sub')).toEqual({
+      url: '/api/harbor-gate/api/beacon/cameras/camera%2Fmain/cat-detection/observation',
+      params: { stream_profile: 'sub' },
+    });
+    expect(harborNaviGateApiUrl('/vision/detection-jobs')).toBe(
+      '/api/harbor-gate/api/beacon/vision/detection-jobs',
     );
-
-    expect(source).toContain(['return `/api/beacon$', '{path}`'].join(''));
-    expect(source).toContain('harborAssistantGateRequiresUserToken');
-    expect(source).toContain('return false;');
+    expect(harborNaviGateRequiresUserToken()).toBe(false);
   });
 });
 
@@ -484,5 +540,22 @@ function searchResponse(partial: Partial<HarborAssistantSearchResponse> = {}): H
     resource_profile: 'cpu_only',
     answer: partial.answer,
     review_scope: partial.review_scope,
+  };
+}
+
+function detectionJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    job_id: 'yolo-test',
+    camera_id: 'camera/main',
+    status: 'running',
+    target_labels: ['cat'],
+    stream_profile: 'sub',
+    max_fps: 25,
+    confidence: 0.35,
+    lease_id: 'lease-test',
+    started_at: '2026-07-24T00:00:00Z',
+    updated_at: '2026-07-24T00:00:00Z',
+    expires_at: '2026-07-24T00:05:00Z',
+    ...overrides,
   };
 }

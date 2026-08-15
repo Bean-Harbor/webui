@@ -238,6 +238,67 @@ export interface HarborAssistantCameraLiveSessionResponse {
   } | null;
 }
 
+export interface HarborAssistantDetection {
+  label: string;
+  confidence: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+export interface HarborAssistantDetectionResult {
+  schema: string;
+  ok: boolean;
+  sequence: number;
+  target_label: string;
+  provider: string;
+  frame_epoch_ms: number;
+  processed_epoch_ms: number;
+  result_age_ms: number;
+  inference_ms: number;
+  detection_count: number;
+  detections: HarborAssistantDetection[];
+}
+
+export interface HarborAssistantDetectionMetrics {
+  status: string;
+  provider: string;
+  frames_processed: number;
+  cat_frames: number;
+  average_inference_ms: number;
+  p95_inference_ms: number;
+  uptime_ms: number;
+  updated_at_epoch_ms: number;
+}
+
+export interface HarborAssistantCatDetectionObservation {
+  camera_id: string;
+  status: string;
+  stream_profile: string;
+  latest_result?: HarborAssistantDetectionResult | null;
+  metrics?: HarborAssistantDetectionMetrics | null;
+}
+
+export interface HarborAssistantDetectionJobResponse {
+  job_id: string;
+  camera_id: string;
+  status: string;
+  target_labels: string[];
+  stream_profile: string;
+  max_fps: number;
+  confidence: number;
+  lease_id: string;
+  started_at: string;
+  updated_at: string;
+  expires_at: string;
+  managed_by_live?: boolean;
+  reused?: boolean;
+  latest_result?: HarborAssistantDetectionResult | null;
+  metrics?: HarborAssistantDetectionMetrics | null;
+  message?: string | null;
+}
+
 export interface HarborAssistantHarborLinkFeatureStatus {
   status?: string | null;
   basePath?: string | null;

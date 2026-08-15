@@ -165,6 +165,26 @@
   min-width: 112px;
 }
 
+.cat-detection-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-height: 24px;
+}
+
+.cat-detection-status {
+  color: #18a957;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.cat-detection-error {
+  color: var(--red);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
 .dvr-preview-row {
   align-items: start;
   display: grid;
@@ -226,6 +246,12 @@
   width: 100%;
 }
 
+.live-panel img.live-starting-frame {
+  inset: 0;
+  position: absolute;
+  z-index: 1;
+}
+
 .live-transition-frame {
   height: 100%;
   inset: 0;
@@ -239,6 +265,16 @@
 
 .live-transition-frame.visible {
   visibility: visible;
+}
+
+.cat-detection-overlay {
+  height: 100%;
+  inset: 0;
+  object-fit: contain;
+  pointer-events: none;
+  position: absolute;
+  width: 100%;
+  z-index: 3;
 }
 
 .live-empty-state {

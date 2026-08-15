@@ -99,6 +99,7 @@ jobs:
       - name: Run Harbor Assistant tests
         run: >-
           yarn test
+          src/app/app.routes.harbornavi.spec.ts
           src/app/pages/harbor-assistant/camera/harbor-assistant-camera.component.spec.ts
           src/app/pages/harbor-assistant/camera/live-controls/harbor-assistant-live-controls.component.spec.ts
           src/app/pages/harbor-assistant/harbor-assistant.component.spec.ts
@@ -106,6 +107,7 @@ jobs:
           src/app/pages/harbor-assistant/search/harbor-assistant-search.component.spec.ts
           src/app/pages/harbor-assistant/services/harbor-assistant-api.service.spec.ts
           src/app/pages/harbor-assistant/shared/harbor-assistant-content-api.service.spec.ts
+          src/app/pages/harbor-assistant/shared/harbor-assistant-retrieval-settings-dialog.component.spec.ts
           src/app/pages/harbor-assistant/shared/harbor-assistant-results.spec.ts
           src/app/pages/harbor-assistant/utils/harborgate-urls.spec.ts
           --runInBand

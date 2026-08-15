@@ -117,7 +117,7 @@ chmod 0644 "$package_root/usr/share/doc/$package_name/release-manifest.json"
 cat > "$package_root/etc/nginx/conf.d/harbornavi-webui.conf" <<'NGINX'
 server {
     listen 80;
-    server_name 192.168.6.219 192.168.3.21 192.168.3.70 127.0.0.1 localhost;
+    server_name ~^.+$;
     server_tokens off;
 
     client_max_body_size 50m;
@@ -134,6 +134,19 @@ server {
         alias /usr/share/harbornavi/webui/;
         try_files $uri $uri/ /ui/index.html;
         add_header Cache-Control "must-revalidate";
+    }
+
+    location ^~ /shared/cameras/ {
+        proxy_pass http://127.0.0.1:4174;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     location = /api/beacon {
