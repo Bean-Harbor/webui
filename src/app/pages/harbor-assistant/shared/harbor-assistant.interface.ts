@@ -280,6 +280,27 @@ export interface HarborAssistantCatDetectionObservation {
   metrics?: HarborAssistantDetectionMetrics | null;
 }
 
+export type HarborAssistantCatDetectionStreamProfile = 'sub' | 'main';
+export type HarborAssistantCatDetectionEffectiveStatus
+  = 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
+
+export interface HarborAssistantCatDetectionControlRequest {
+  enabled: boolean;
+  stream_profile: HarborAssistantCatDetectionStreamProfile;
+}
+
+export interface HarborAssistantCatDetectionControlProjection {
+  camera_id: string;
+  explicit: boolean;
+  desired_enabled: boolean;
+  desired_stream_profile: HarborAssistantCatDetectionStreamProfile;
+  effective_status: HarborAssistantCatDetectionEffectiveStatus;
+  effective_stream_profile: HarborAssistantCatDetectionStreamProfile | null;
+  job_id: string | null;
+  updated_at: string | null;
+  message: string | null;
+}
+
 export interface HarborAssistantDetectionJobResponse {
   job_id: string;
   camera_id: string;

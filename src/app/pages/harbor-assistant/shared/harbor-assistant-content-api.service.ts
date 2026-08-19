@@ -11,6 +11,8 @@ import {
 import { harborAssistantPreviewUrl } from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantCatDetectionControlProjection,
+  HarborAssistantCatDetectionControlRequest,
   HarborAssistantCatDetectionObservation,
   HarborAssistantConversationDetail,
   HarborAssistantConversationListResponse,
@@ -225,6 +227,28 @@ export class HarborAssistantContentApiService {
         ...options,
         params: request.params,
       },
+    ));
+  }
+
+  getCatDetectionControl(cameraId: string): Observable<HarborAssistantCatDetectionControlProjection> {
+    return this.withUserToken((options) => this.http.get<HarborAssistantCatDetectionControlProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/cat-detection/control`),
+      options,
+    ));
+  }
+
+  putCatDetectionControl(
+    cameraId: string,
+    request: HarborAssistantCatDetectionControlRequest,
+  ): Observable<HarborAssistantCatDetectionControlProjection> {
+    const payload: HarborAssistantCatDetectionControlRequest = {
+      enabled: request.enabled,
+      stream_profile: request.stream_profile,
+    };
+    return this.withUserToken((options) => this.http.put<HarborAssistantCatDetectionControlProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/cat-detection/control`),
+      payload,
+      options,
     ));
   }
 

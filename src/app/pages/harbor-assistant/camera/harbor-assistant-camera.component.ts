@@ -31,7 +31,10 @@ import {
 } from 'app/pages/harbor-assistant/shared/harbor-assistant-time-range-dialog.component';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantCatDetectionControlProjection,
+  HarborAssistantCatDetectionEffectiveStatus,
   HarborAssistantCatDetectionObservation,
+  HarborAssistantCatDetectionStreamProfile,
   HarborAssistantDetectionResult,
   HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
@@ -199,9 +202,22 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   protected readonly actionBusy = signal<string | null>(null);
   protected readonly actionMessage = signal<string | null>(null);
   protected readonly actionError = signal<string | null>(null);
-  protected readonly catDetectionBusy = signal(false);
-  protected readonly catDetectionEnabled = signal(false);
-  protected readonly catDetectionError = signal<string | null>(null);
+  private readonly catDetectionWritePendingByCamera = signal<ReadonlyMap<string, number>>(new Map());
+  protected readonly catDetectionBusy = computed(() => this.catDetectionWritePendingForSelectedCamera());
+  protected readonly catDetectionControlLoaded = signal(false);
+  protected readonly catDetectionDesiredEnabled = signal<boolean | null>(null);
+  protected readonly catDetectionEnabled = computed(() => this.catDetectionDesiredEnabled() === true);
+  private readonly catDetectionTransientError = signal<string | null>(null);
+  private readonly catDetectionWriteError = signal<{ cameraId: string; message: string } | null>(null);
+
+  protected readonly catDetectionError = computed(() => {
+    const writeError = this.catDetectionWriteError();
+    return writeError?.cameraId === this.selectedCameraId()
+      ? writeError.message
+      : this.catDetectionTransientError();
+  });
+
+  protected readonly catDetectionEffectiveStatus = signal<HarborAssistantCatDetectionEffectiveStatus | null>(null);
   protected readonly catDetectionJob = signal<HarborAssistantCatDetectionObservation | null>(null);
   protected readonly mediaLibraryExpanded = signal(true);
   protected readonly selectedMediaItem = signal<HarborAssistantSearchMediaItem | null>(null);
@@ -218,7 +234,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private catDetectionResultReceivedAtMs: number | null = null;
   private catDetectionResultSequence: number | null = null;
   private catDetectionToken = 0;
-  private catDetectionRequestedEnabled = false;
+  private catDetectionControlToken = 0;
+  private catDetectionWriteToken = 0;
+  private readonly catDetectionReloadPendingCameraIds = new Set<string>();
+  private readonly confirmedCatDetectionControls = new Map<string, HarborAssistantCatDetectionControlProjection>();
   private hlsAttachToken = 0;
   private hlsPlaybackToken = 0;
   private hlsWarmToken = 0;
@@ -228,7 +247,6 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private liveStopPending = false;
   private liveStopUnconfirmed = false;
   private liveStreamSwitchTarget: HarborAssistantLiveStreamProfile | null = null;
-  private liveStreamSwitchRestoreCatDetection = false;
   private destroyed = false;
   private hlsWarmSession: HarborAssistantCameraLiveSessionResponse | null = null;
   private hlsWarmStartRequest: HarborAssistantHlsWarmStartRequest | null = null;
@@ -366,6 +384,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   refreshCameraDvr(): void {
+    const deviceId = this.selectedCameraId();
+    if (!this.deferCatDetectionControlLoadForPendingWrite(deviceId)) {
+      this.prepareCatDetectionControlLoad(deviceId);
+    }
     this.cameraLoading.set(true);
     this.cameraError.set(null);
     const refreshErrors: string[] = [];
@@ -428,6 +450,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(selected));
     }
     this.selectedCameraId.set(selected);
+    this.loadCatDetectionControl(selected);
     this.scheduleHlsLivePrewarm();
   }
 
@@ -452,6 +475,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (profile === this.selectedStreamProfile()) {
       return;
     }
+    if (this.deferCatDetectionControlLoadForPendingWrite(this.selectedCameraId())) {
+      return;
+    }
     if (this.liveStreamSwitching() || this.hlsLiveStatus() === 'starting') {
       return;
     }
@@ -461,6 +487,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     this.stopHlsWarmSession();
     this.selectedStreamProfile.set(profile);
+    this.loadCatDetectionControl(this.selectedCameraId());
     this.scheduleHlsLivePrewarm();
   }
 
@@ -475,10 +502,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.beginLiveTransportTransition('webrtc');
     this.liveStreamSwitchTarget = profile;
     this.liveStreamSwitching.set(true);
-    this.liveStreamSwitchRestoreCatDetection = this.catDetectionRequestedEnabled || this.catDetectionEnabled();
     this.selectedStreamProfile.set(profile);
     this.showLiveFeedback(`Switching to ${profile} stream...`, 1800);
-    this.stopCatDetection();
+    this.loadCatDetectionControl(deviceId);
     this.hlsAttachToken += 1;
     this.hlsPlaybackToken += 1;
     this.hlsRecoveryAttempts = 0;
@@ -745,13 +771,36 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   catDetectionCanStart(): boolean {
-    return Boolean(this.selectedCameraId())
-      && this.hlsLiveStatus() === 'live';
+    return !this.catDetectionControlDisabled();
+  }
+
+  catDetectionWritePendingForSelectedCamera(): boolean {
+    const deviceId = this.selectedCameraId();
+    return Boolean(deviceId && this.catDetectionWritePendingByCamera().has(deviceId));
+  }
+
+  catDetectionControlDisabled(): boolean {
+    const status = this.catDetectionEffectiveStatus();
+    return !this.selectedCameraId()
+      || !this.catDetectionControlLoaded()
+      || this.catDetectionBusy()
+      || status === 'starting'
+      || status === 'stopping';
   }
 
   catDetectionStatusLabel(): string {
-    if (this.catDetectionBusy()) {
-      return this.translate.instant(this.catDetectionJob() ? 'Stopping detection...' : 'Starting detection...');
+    const effectiveStatus = this.catDetectionEffectiveStatus();
+    if (effectiveStatus === 'starting') {
+      return this.translate.instant('Starting detection...');
+    }
+    if (effectiveStatus === 'stopping') {
+      return this.translate.instant('Stopping detection...');
+    }
+    if (effectiveStatus === 'failed') {
+      return this.translate.instant('Cat detection failed.');
+    }
+    if (effectiveStatus === 'stopped') {
+      return this.translate.instant('Cat detection stopped.');
     }
     const job = this.catDetectionJob();
     const result = job?.latest_result;
@@ -763,7 +812,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       device = 'CPU';
     }
     if (!result) {
-      return device ?? this.translate.instant('Waiting for first result...');
+      return this.translate.instant('Cat detection running.');
     }
     const cats = this.translate.instant('{count, plural, one {# cat} other {# cats}}', {
       count: result.detection_count,
@@ -772,54 +821,205 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   setCatDetectionEnabled(enabled: boolean): void {
-    this.catDetectionRequestedEnabled = enabled;
-    if (enabled) {
-      this.startCatDetection();
+    const deviceId = this.selectedCameraId();
+    if (!deviceId || this.catDetectionControlDisabled()) {
       return;
     }
-    this.stopCatDetection();
+
+    this.catDetectionControlToken += 1;
+    const writeToken = ++this.catDetectionWriteToken;
+    const observationToken = this.catDetectionToken;
+    const confirmedProjection = this.confirmedCatDetectionControls.get(deviceId) ?? null;
+    const pendingWrites = new Map(this.catDetectionWritePendingByCamera());
+    pendingWrites.set(deviceId, writeToken);
+    this.catDetectionWritePendingByCamera.set(pendingWrites);
+    if (this.catDetectionWriteError()?.cameraId === deviceId) {
+      this.catDetectionWriteError.set(null);
+    }
+    this.catDetectionTransientError.set(null);
+    this.api.putCatDetectionControl(deviceId, {
+      enabled,
+      stream_profile: this.selectedStreamProfile(),
+    }).subscribe({
+      next: (projection) => {
+        this.settleCatDetectionWrite(
+          deviceId,
+          writeToken,
+          confirmedProjection,
+          projection,
+          observationToken === this.catDetectionToken,
+        );
+      },
+      error: () => {
+        this.settleCatDetectionWrite(deviceId, writeToken, confirmedProjection, null, false);
+      },
+    });
   }
 
-  private startCatDetection(): void {
-    const deviceId = this.selectedCameraId();
-    if (
-      !deviceId
-      || !this.catDetectionCanStart()
-      || this.catDetectionBusy()
-      || this.catDetectionEnabled()
-      || this.catDetectionJob()
-    ) {
+  private loadCatDetectionControl(deviceId: string | null): void {
+    if (this.deferCatDetectionControlLoadForPendingWrite(deviceId)) {
+      return;
+    }
+    this.prepareCatDetectionControlLoad(deviceId);
+    const requestToken = this.catDetectionControlToken;
+    if (!deviceId) {
+      return;
+    }
+    const observationToken = this.catDetectionToken;
+    this.api.getCatDetectionControl(deviceId).pipe(
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (projection) => {
+        if (!this.catDetectionControlRequestIsCurrent(deviceId, requestToken)) {
+          return;
+        }
+        this.applyCatDetectionControlProjection(
+          projection,
+          observationToken === this.catDetectionToken,
+        );
+      },
+      error: () => {
+        if (!this.catDetectionControlRequestIsCurrent(deviceId, requestToken)) {
+          return;
+        }
+        this.catDetectionControlLoaded.set(false);
+        this.catDetectionTransientError.set(this.translate.instant('Unable to read cat detection status.'));
+      },
+    });
+  }
+
+  private deferCatDetectionControlLoadForPendingWrite(deviceId: string | null): boolean {
+    if (!deviceId || !this.catDetectionWritePendingByCamera().has(deviceId)) {
+      return false;
+    }
+    this.catDetectionReloadPendingCameraIds.add(deviceId);
+    this.prepareCatDetectionControlLoad(deviceId);
+    return true;
+  }
+
+  private settleCatDetectionWrite(
+    deviceId: string,
+    writeToken: number,
+    confirmedProjection: HarborAssistantCatDetectionControlProjection | null,
+    projection: HarborAssistantCatDetectionControlProjection | null,
+    observe: boolean,
+  ): void {
+    if (this.catDetectionWritePendingByCamera().get(deviceId) !== writeToken) {
+      return;
+    }
+    const pendingWrites = new Map(this.catDetectionWritePendingByCamera());
+    pendingWrites.delete(deviceId);
+    this.catDetectionWritePendingByCamera.set(pendingWrites);
+    const reloadRequested = this.catDetectionReloadPendingCameraIds.delete(deviceId);
+    if (this.destroyed || deviceId !== this.selectedCameraId()) {
+      return;
+    }
+    if (projection) {
+      this.applyCatDetectionControlProjection(projection, observe && !reloadRequested);
+    } else {
+      this.stopCatDetectionObservation();
+      if (confirmedProjection) {
+        this.restoreConfirmedCatDetectionControl(confirmedProjection);
+      }
+      this.catDetectionWriteError.set({
+        cameraId: deviceId,
+        message: this.translate.instant('Unable to update cat detection.'),
+      });
+    }
+    if (reloadRequested) {
+      this.loadCatDetectionControl(deviceId);
+    }
+  }
+
+  private prepareCatDetectionControlLoad(deviceId: string | null): void {
+    this.catDetectionControlToken += 1;
+    this.catDetectionControlLoaded.set(false);
+    this.catDetectionTransientError.set(null);
+    this.stopCatDetectionObservation();
+    if (!deviceId) {
+      this.catDetectionDesiredEnabled.set(null);
+      this.catDetectionEffectiveStatus.set(null);
       return;
     }
 
-    const token = ++this.catDetectionToken;
-    this.catDetectionBusy.set(true);
-    this.catDetectionEnabled.set(true);
-    this.catDetectionError.set(null);
-    const streamProfile = this.selectedStreamProfile();
+    const confirmedProjection = this.confirmedCatDetectionControls.get(deviceId) ?? null;
+    if (confirmedProjection) {
+      this.restoreConfirmedCatDetectionControl(confirmedProjection);
+      this.catDetectionControlLoaded.set(false);
+    } else {
+      this.catDetectionDesiredEnabled.set(null);
+      this.catDetectionEffectiveStatus.set(null);
+    }
+  }
+
+  private catDetectionControlRequestIsCurrent(deviceId: string, requestToken: number): boolean {
+    return !this.destroyed
+      && requestToken === this.catDetectionControlToken
+      && deviceId === this.selectedCameraId();
+  }
+
+  private applyCatDetectionControlProjection(
+    projection: HarborAssistantCatDetectionControlProjection,
+    observe: boolean,
+  ): void {
+    const deviceId = this.selectedCameraId();
+    if (!deviceId || projection.camera_id !== deviceId) {
+      return;
+    }
+    this.confirmedCatDetectionControls.set(deviceId, projection);
+    this.catDetectionControlLoaded.set(true);
+    this.catDetectionTransientError.set(null);
+    this.restoreConfirmedCatDetectionControl(projection);
+    if (!projection.desired_enabled) {
+      this.stopCatDetectionObservation();
+      return;
+    }
+    if (observe) {
+      this.startCatDetectionObservation(
+        deviceId,
+        projection.effective_stream_profile ?? projection.desired_stream_profile,
+      );
+    }
+  }
+
+  private restoreConfirmedCatDetectionControl(projection: HarborAssistantCatDetectionControlProjection): void {
+    this.catDetectionDesiredEnabled.set(projection.desired_enabled);
+    this.catDetectionEffectiveStatus.set(projection.effective_status);
+  }
+
+  private startCatDetectionObservation(
+    deviceId: string,
+    streamProfile: HarborAssistantCatDetectionStreamProfile,
+  ): void {
+    this.stopCatDetectionObservation();
+    const token = this.catDetectionToken;
     this.api.detectionJobForCamera(deviceId, streamProfile).pipe(
       takeUntilDestroyed(this.destroyRef),
     ).subscribe({
       next: (job) => {
-        if (
-          this.destroyed
-          || token !== this.catDetectionToken
-          || !this.catDetectionRequestedEnabled
-        ) {
+        if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
           return;
         }
-        this.catDetectionBusy.set(false);
-        this.receiveCatDetectionJob(job);
+        if (this.catDetectionObservationIsTerminal(job.status)) {
+          this.finishCatDetectionObservation(job.status);
+          return;
+        }
+        if (job.status === 'running') {
+          this.receiveCatDetectionJob(job);
+        }
         this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
       },
       error: (error: unknown) => {
-        if (this.destroyed || token !== this.catDetectionToken) {
+        if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
           return;
         }
-        this.stopCatDetection();
-        if (!this.detectionJobNotFound(error)) {
-          this.catDetectionError.set(this.translate.instant('Unable to observe cat detection.'));
+        if (this.detectionJobNotFound(error)) {
+          this.finishCatDetectionObservation('stopped');
+          return;
         }
+        this.catDetectionTransientError.set(this.translate.instant('Unable to observe cat detection.'));
+        this.clearCatDetectionOverlay();
+        this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
       },
     });
   }
@@ -833,34 +1033,37 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.clearCatDetectionPollTimer();
     this.catDetectionPollTimer = this.window.setTimeout(() => {
       this.catDetectionPollTimer = null;
-      if (!this.catDetectionEnabled() || token !== this.catDetectionToken) {
+      if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
         return;
       }
       this.api.detectionJobForCamera(deviceId, streamProfile).pipe(
         takeUntilDestroyed(this.destroyRef),
       ).subscribe({
         next: (job) => {
-          if (token !== this.catDetectionToken) {
+          if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
             return;
           }
-          this.catDetectionError.set(null);
-          this.receiveCatDetectionJob(job);
+          this.catDetectionTransientError.set(null);
           if (job.status === 'running') {
+            this.receiveCatDetectionJob(job);
             this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
             return;
           }
-          this.stopCatDetection();
-          this.catDetectionError.set(this.translate.instant('Cat detection stopped.'));
+          if (this.catDetectionObservationIsTerminal(job.status)) {
+            this.finishCatDetectionObservation(job.status);
+            return;
+          }
+          this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
         },
         error: (error: unknown) => {
-          if (token !== this.catDetectionToken) {
+          if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
             return;
           }
           if (this.detectionJobNotFound(error)) {
-            this.stopCatDetection();
+            this.finishCatDetectionObservation('stopped');
             return;
           }
-          this.catDetectionError.set(this.translate.instant('Unable to observe cat detection.'));
+          this.catDetectionTransientError.set(this.translate.instant('Unable to observe cat detection.'));
           this.clearCatDetectionOverlay();
           this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
         },
@@ -868,13 +1071,25 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }, delayMs);
   }
 
-  private stopCatDetection(): void {
+  private catDetectionObservationIsCurrent(deviceId: string, token: number): boolean {
+    return !this.destroyed
+      && token === this.catDetectionToken
+      && deviceId === this.selectedCameraId()
+      && this.catDetectionEnabled();
+  }
+
+  private catDetectionObservationIsTerminal(status: string): boolean {
+    return status === 'stopped' || status === 'failed';
+  }
+
+  private finishCatDetectionObservation(status: string): void {
+    this.catDetectionEffectiveStatus.set(status === 'failed' ? 'failed' : 'stopped');
+    this.stopCatDetectionObservation();
+  }
+
+  private stopCatDetectionObservation(): void {
     this.catDetectionToken += 1;
-    this.catDetectionRequestedEnabled = false;
     this.clearCatDetectionTimers();
-    this.catDetectionBusy.set(false);
-    this.catDetectionEnabled.set(false);
-    this.catDetectionError.set(null);
     this.catDetectionJob.set(null);
     this.catDetectionResultReceivedAtMs = null;
     this.catDetectionResultSequence = null;
@@ -882,7 +1097,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   private stopCatDetectionOnPageExit(): void {
-    this.stopCatDetection();
+    this.stopCatDetectionObservation();
   }
 
   private detectionJobNotFound(error: unknown): boolean {
@@ -1396,7 +1611,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const session = this.hlsLiveSession();
     const deviceId = session?.device_id ?? this.selectedCameraId();
     const wasStarting = this.hlsLiveStatus() === 'starting';
-    this.stopCatDetection();
+    this.stopCatDetectionObservation();
     this.hlsAttachToken += 1;
     this.hlsPlaybackToken += 1;
     this.hlsRecoveryAttempts = 0;
@@ -1495,7 +1710,6 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private cancelLiveStreamProfileSwitch(): void {
     const wasSwitching = this.liveStreamSwitching();
     this.liveStreamSwitchTarget = null;
-    this.liveStreamSwitchRestoreCatDetection = false;
     this.liveStreamSwitching.set(false);
     if (wasSwitching) {
       this.cancelLiveTransportTransition();
@@ -1511,14 +1725,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     ) {
       return;
     }
-    const restoreCatDetection = this.liveStreamSwitchRestoreCatDetection;
     this.liveStreamSwitchTarget = null;
-    this.liveStreamSwitchRestoreCatDetection = false;
     this.liveStreamSwitching.set(false);
-    if (restoreCatDetection) {
-      this.catDetectionRequestedEnabled = true;
-      this.startCatDetection();
-    }
   }
 
   private liveSessionAlreadyAbsent(error: unknown): boolean {
@@ -1625,8 +1833,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   onCameraTabChange(index: number): void {
     this.selectedTabIndex.set(index);
     if (index !== 0) {
+      this.stopCatDetectionObservation();
       return;
     }
+    this.loadCatDetectionControl(this.selectedCameraId());
     this.pausePlaybackVideo();
     if (this.livePlaybackBackgroundPaused) {
       if (this.liveControlPlaybackMode() === 'webrtc') {

@@ -21,7 +21,13 @@
               <button mat-stroked-button type="button" [disabled]="!liveCanStop()" (click)="stopLive()">
                 {{ 'Stop live' | translate }}
               </button>
-              <button mat-stroked-button type="button" [disabled]="cameraLoading()" (click)="refreshCameraDvr()">
+              <button
+                mat-stroked-button
+                data-testid="refresh-cameras"
+                type="button"
+                [disabled]="cameraLoading() || catDetectionWritePendingForSelectedCamera()"
+                (click)="refreshCameraDvr()"
+              >
                 {{ cameraLoading() ? ('Refreshing' | translate) : ('Refresh cameras' | translate) }}
               </button>
             </div>
@@ -46,8 +52,11 @@
             </div>
             <mat-button-toggle-group
               class="stream-profile-toggle"
+              data-testid="stream-profile-toggle"
               aria-label="Live stream profile"
-              [disabled]="liveStreamSwitching() || hlsLiveStatus() === 'starting'"
+              [disabled]="liveStreamSwitching()
+                || hlsLiveStatus() === 'starting'
+                || catDetectionWritePendingForSelectedCamera()"
               [value]="selectedStreamProfile()"
               (valueChange)="selectStreamProfile($any($event))"
             >
@@ -55,14 +64,29 @@
               <mat-button-toggle value="main">{{ 'Main stream' | translate }}</mat-button-toggle>
             </mat-button-toggle-group>
             <div class="cat-detection-controls">
-              <mat-slide-toggle
-                [checked]="catDetectionEnabled()"
-                [disabled]="catDetectionBusy() || (!catDetectionEnabled() && !catDetectionCanStart())"
-                (change)="setCatDetectionEnabled($event.checked)"
-              >
-                {{ 'Cat detection' | translate }}
-              </mat-slide-toggle>
-              @if (catDetectionEnabled() || catDetectionBusy()) {
+              @if (catDetectionDesiredEnabled() !== null) {
+                <mat-slide-toggle
+                  data-testid="cat-detection-toggle"
+                  [checked]="catDetectionDesiredEnabled()"
+                  [disabled]="catDetectionControlDisabled()"
+                  (change)="setCatDetectionEnabled($event.checked)"
+                >
+                  {{ 'Cat detection' | translate }}
+                </mat-slide-toggle>
+              } @else {
+                <button
+                  mat-stroked-button
+                  data-testid="cat-detection-status-unknown"
+                  type="button"
+                  disabled
+                  [attr.aria-busy]="catDetectionError() ? null : true"
+                >
+                  {{ (catDetectionError()
+                    ? 'Cat detection status unavailable.'
+                    : 'Loading cat detection status...') | translate }}
+                </button>
+              }
+              @if (catDetectionEffectiveStatus()) {
                 <span class="cat-detection-status" data-testid="cat-detection-status">
                   {{ catDetectionStatusLabel() }}
                 </span>

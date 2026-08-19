@@ -15,6 +15,8 @@ import {
 } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix.harbornavi';
 import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/shared/harbor-assistant-content-api.service';
 import {
+  HarborAssistantCatDetectionControlProjection,
+  HarborAssistantCatDetectionControlRequest,
   HarborAssistantSearchRequest,
   HarborAssistantSearchResponse,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
@@ -411,15 +413,113 @@ describe('Harbor Assistant content API service', () => {
     await secondPromise;
   });
 
-  it('exposes detection observation without detection mutation APIs', () => {
+  it('exposes detection observation and only the explicit detection control mutation API', () => {
     const service = spectator.service as unknown as Record<string, unknown>;
 
     expect(typeof service.detectionJobForCamera).toBe('function');
     expect(typeof service.detectionJob).toBe('function');
+    expect(typeof service.getCatDetectionControl).toBe('function');
+    expect(typeof service.putCatDetectionControl).toBe('function');
     expect(service.startDetectionJob).toBeUndefined();
     expect(service.renewDetectionJob).toBeUndefined();
     expect(service.stopDetectionJob).toBeUndefined();
     expect(service.stopDetectionJobOnPageExit).toBeUndefined();
+  });
+
+  it('exports cat detection control contracts under the Harbor Assistant namespace', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'src/app/pages/harbor-assistant/shared/harbor-assistant.interface.ts'),
+      'utf8',
+    );
+
+    expect(source).toContain('export type HarborAssistantCatDetectionStreamProfile');
+    expect(source).toContain('export type HarborAssistantCatDetectionEffectiveStatus');
+    expect(source).toContain('export interface HarborAssistantCatDetectionControlRequest');
+    expect(source).toContain('export interface HarborAssistantCatDetectionControlProjection');
+  });
+
+  it('gets typed cat detection control through the authenticated Gate path with an encoded camera ID', async () => {
+    const response = catDetectionControlProjection();
+    const promise = firstValueFrom(spectator.service.getCatDetectionControl('camera/main'));
+    const request = httpMock.expectOne(
+      '/api/harbor-gate/api/beacon/cameras/camera%2Fmain/cat-detection/control',
+    );
+
+    expect(request.request.method).toBe('GET');
+    expect(request.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
+    request.flush(response);
+
+    await expect(promise).resolves.toEqual(response);
+    expect((await promise).effective_status).toBe('running');
+    expect(spectator.inject(AuthService).getHarborAssistantOneTimeToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('puts only the typed cat detection control request through the authenticated Gate path', async () => {
+    const payload = {
+      enabled: false,
+      stream_profile: 'main',
+      ignored: 'not-forwarded',
+    } as HarborAssistantCatDetectionControlRequest;
+    const response = catDetectionControlProjection({
+      desired_enabled: false,
+      desired_stream_profile: 'main',
+      effective_status: 'stopped',
+      effective_stream_profile: null,
+      job_id: null,
+    });
+    const promise = firstValueFrom(spectator.service.putCatDetectionControl('camera/main', payload));
+    const request = httpMock.expectOne(
+      '/api/harbor-gate/api/beacon/cameras/camera%2Fmain/cat-detection/control',
+    );
+
+    expect(request.request.method).toBe('PUT');
+    expect(request.request.body).toEqual({
+      enabled: false,
+      stream_profile: 'main',
+    });
+    expect(request.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
+    request.flush(response);
+
+    await expect(promise).resolves.toEqual(response);
+    expect((await promise).effective_status).toBe('stopped');
+    expect(spectator.inject(AuthService).getHarborAssistantOneTimeToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates cat detection control GET errors without rewriting them', async () => {
+    const promise = firstValueFrom(spectator.service.getCatDetectionControl('missing-camera'));
+    const request = httpMock.expectOne(
+      '/api/harbor-gate/api/beacon/cameras/missing-camera/cat-detection/control',
+    );
+
+    request.flush(
+      { code: 'CAMERA_NOT_FOUND', message: 'Camera not found' },
+      { status: 404, statusText: 'Not Found' },
+    );
+
+    await expect(promise).rejects.toEqual(expect.objectContaining({
+      status: 404,
+      error: { code: 'CAMERA_NOT_FOUND', message: 'Camera not found' },
+    }));
+  });
+
+  it('propagates cat detection control PUT errors without rewriting them', async () => {
+    const promise = firstValueFrom(spectator.service.putCatDetectionControl('camera-main', {
+      enabled: true,
+      stream_profile: 'sub',
+    }));
+    const request = httpMock.expectOne(
+      '/api/harbor-gate/api/beacon/cameras/camera-main/cat-detection/control',
+    );
+
+    request.flush(
+      { code: 'CONTROL_FAILED', message: 'Control failed' },
+      { status: 500, statusText: 'Internal Server Error' },
+    );
+
+    await expect(promise).rejects.toEqual(expect.objectContaining({
+      status: 500,
+      error: { code: 'CONTROL_FAILED', message: 'Control failed' },
+    }));
   });
 
   it('reads detection collection and item endpoints through the authenticated Gate path', async () => {
@@ -556,6 +656,23 @@ function detectionJob(overrides: Record<string, unknown> = {}): Record<string, u
     started_at: '2026-07-24T00:00:00Z',
     updated_at: '2026-07-24T00:00:00Z',
     expires_at: '2026-07-24T00:05:00Z',
+    ...overrides,
+  };
+}
+
+function catDetectionControlProjection(
+  overrides: Partial<HarborAssistantCatDetectionControlProjection> = {},
+): HarborAssistantCatDetectionControlProjection {
+  return {
+    camera_id: 'camera/main',
+    explicit: true,
+    desired_enabled: true,
+    desired_stream_profile: 'sub',
+    effective_status: 'running',
+    effective_stream_profile: 'sub',
+    job_id: 'yolo-test',
+    updated_at: '2026-08-18T03:30:00Z',
+    message: null,
     ...overrides,
   };
 }
