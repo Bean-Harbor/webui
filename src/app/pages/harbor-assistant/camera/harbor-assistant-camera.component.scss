@@ -165,7 +165,8 @@
   min-width: 112px;
 }
 
-.cat-detection-controls {
+.cat-detection-controls,
+.package-detection-controls {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
@@ -173,13 +174,15 @@
   min-height: 24px;
 }
 
-.cat-detection-status {
+.cat-detection-status,
+.package-detection-status {
   color: #18a957;
   font-size: 0.82rem;
   font-variant-numeric: tabular-nums;
 }
 
-.cat-detection-error {
+.cat-detection-error,
+.package-detection-error {
   color: var(--red);
   font-size: 0.82rem;
   overflow-wrap: anywhere;

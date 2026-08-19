@@ -13,6 +13,7 @@ import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/sha
 import {
   HarborAssistantCameraLiveSessionResponse,
   HarborAssistantCatDetectionControlProjection,
+  HarborAssistantPackageDetectionControlProjection,
   HarborAssistantDetectionJobResponse,
   HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
@@ -69,6 +70,16 @@ describe('Harbor Assistant camera component', () => {
           effective_stream_profile: request.enabled ? request.stream_profile : null,
         }));
       }),
+      getPackageDetectionControl: jest.fn(() => of(packageDetectionControlProjection())),
+      putPackageDetectionControl: jest.fn((
+        _cameraId: string,
+        request: { enabled: boolean; stream_profile: 'sub' | 'main' },
+      ) => of(packageDetectionControlProjection({
+        desired_enabled: request.enabled,
+        desired_stream_profile: request.stream_profile,
+        effective_status: request.enabled ? 'running' : 'stopped',
+        effective_stream_profile: request.enabled ? request.stream_profile : null,
+      }))),
       detectionJob: jest.fn(() => of(detectionJob())),
       createSnapshotTask: jest.fn(() => snapshotSubject$.asObservable()),
       startDvrRecording: jest.fn(() => of(dvrStatus('recording'))),
@@ -670,6 +681,64 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('loads and renders independent cat and package detection controls', fakeAsync(() => {
+    spectator = createComponent();
+    spectator.detectChanges();
+
+    expect(api.getCatDetectionControl).toHaveBeenCalledWith('cam-1');
+    expect(api.getPackageDetectionControl).toHaveBeenCalledWith('cam-1');
+    expect(spectator.query('[data-testid="cat-detection-toggle"]')).not.toBeNull();
+    expect(spectator.query('[data-testid="package-detection-toggle"]')).not.toBeNull();
+    discardPeriodicTasks();
+  }));
+
+  it('puts package detection independently with the selected stream profile', fakeAsync(() => {
+    spectator = createComponent();
+
+    spectator.component.setPackageDetectionEnabled(true);
+
+    expect(api.putPackageDetectionControl).toHaveBeenCalledWith('cam-1', {
+      enabled: true,
+      stream_profile: 'sub',
+    });
+    expect(api.putCatDetectionControl).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('restores package state and asks the user to disable cat detection after a 409 conflict', fakeAsync(() => {
+    api.putPackageDetectionControl = jest.fn(() => throwError(() => Object.assign(
+      new Error('detector conflict'),
+      { status: 409 },
+    )));
+    spectator = createComponent();
+    spectator.component.setPackageDetectionEnabled(true);
+    spectator.detectChanges();
+
+    expect(spectator.query<HTMLButtonElement>('[data-testid="package-detection-toggle"] button')
+      ?.getAttribute('aria-checked')).toBe('false');
+    expect(spectator.query('[data-testid="package-detection-error"]')).toHaveText(
+      'Please turn off cat detection before enabling package detection.',
+    );
+    discardPeriodicTasks();
+  }));
+
+  it('restores cat state and asks the user to disable package detection after a 409 conflict', fakeAsync(() => {
+    api.putCatDetectionControl = jest.fn(() => throwError(() => Object.assign(
+      new Error('detector conflict'),
+      { status: 409 },
+    )));
+    spectator = createComponent();
+    spectator.component.setCatDetectionEnabled(true);
+    spectator.detectChanges();
+
+    expect(spectator.query<HTMLButtonElement>('[data-testid="cat-detection-toggle"] button')
+      ?.getAttribute('aria-checked')).toBe('false');
+    expect(spectator.query('.cat-detection-error')).toHaveText(
+      'Please turn off package detection before enabling cat detection.',
+    );
+    discardPeriodicTasks();
+  }));
+
   it('disables cat detection immediately while a camera switch is waiting to reload control', fakeAsync(() => {
     const refreshState$ = new Subject<HarborAssistantSearchCameraStateResponse>();
     api.cameraState = jest.fn()
@@ -1031,7 +1100,10 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it.each(['starting', 'stopping'] as const)('disables control while effective status is %s', fakeAsync((status) => {
+  it.each([
+    { status: 'starting' as const, disabled: false },
+    { status: 'stopping' as const, disabled: true },
+  ])('keeps disable available while effective status is $status', fakeAsync(({ status, disabled }) => {
     api.getCatDetectionControl = jest.fn(() => of(catDetectionControlProjection({
       desired_enabled: status === 'starting',
       effective_status: status,
@@ -1041,12 +1113,12 @@ describe('Harbor Assistant camera component', () => {
     spectator.detectChanges();
 
     const toggle = spectator.query<HTMLButtonElement>('mat-slide-toggle button');
-    expect(toggle?.disabled).toBe(true);
+    expect(toggle?.disabled).toBe(disabled);
     expect(spectator.query('[data-testid="cat-detection-status"]')).toHaveText(
       status === 'starting' ? 'Starting detection...' : 'Stopping detection...',
     );
     spectator.component.setCatDetectionEnabled(status !== 'starting');
-    expect(api.putCatDetectionControl).not.toHaveBeenCalled();
+    expect(api.putCatDetectionControl).toHaveBeenCalledTimes(status === 'starting' ? 1 : 0);
     discardPeriodicTasks();
   }));
 
@@ -2035,6 +2107,38 @@ describe('Harbor Assistant camera component', () => {
     expect(api.getCatDetectionControl).toHaveBeenCalledWith('cam-1');
     expect(api.detectionJobForCamera).toHaveBeenCalledWith('cam-1', 'main');
     expect(api.putCatDetectionControl).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('moves enabled package detection only after the target live profile renders', fakeAsync(() => {
+    api.startCameraLiveSession = jest.fn((_deviceId: string, profile: string) => of(liveSession({
+      session_id: `live-${profile}`,
+      stream_profile: profile,
+    })));
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true,
+      desired_stream_profile: 'sub',
+      effective_status: 'running',
+      effective_stream_profile: 'sub',
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      markHlsPlaybackReady: () => void;
+    };
+    componentState.hlsLiveSession.set(liveSession({ session_id: 'live-sub', stream_profile: 'sub' }));
+    componentState.hlsLiveStatus.set('live');
+    api.putPackageDetectionControl?.mockClear();
+
+    spectator.component.selectStreamProfile('main');
+
+    expect(api.putPackageDetectionControl).not.toHaveBeenCalled();
+    componentState.markHlsPlaybackReady();
+    expect(api.putPackageDetectionControl).toHaveBeenCalledWith('cam-1', {
+      enabled: true,
+      stream_profile: 'main',
+    });
     discardPeriodicTasks();
   }));
 
@@ -4283,6 +4387,12 @@ function catDetectionControlProjection(
     message: null,
     ...options,
   };
+}
+
+function packageDetectionControlProjection(
+  options: Partial<HarborAssistantPackageDetectionControlProjection> = {},
+): HarborAssistantPackageDetectionControlProjection {
+  return catDetectionControlProjection(options);
 }
 
 function detectionJob(

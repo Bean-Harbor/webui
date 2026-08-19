@@ -14,6 +14,8 @@ import {
   HarborAssistantCatDetectionControlProjection,
   HarborAssistantCatDetectionControlRequest,
   HarborAssistantCatDetectionObservation,
+  HarborAssistantPackageDetectionControlProjection,
+  HarborAssistantPackageDetectionControlRequest,
   HarborAssistantConversationDetail,
   HarborAssistantConversationListResponse,
   HarborAssistantConversationSettings,
@@ -247,6 +249,28 @@ export class HarborAssistantContentApiService {
     };
     return this.withUserToken((options) => this.http.put<HarborAssistantCatDetectionControlProjection>(
       this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/cat-detection/control`),
+      payload,
+      options,
+    ));
+  }
+
+  getPackageDetectionControl(cameraId: string): Observable<HarborAssistantPackageDetectionControlProjection> {
+    return this.withUserToken((options) => this.http.get<HarborAssistantPackageDetectionControlProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/package-detection/control`),
+      options,
+    ));
+  }
+
+  putPackageDetectionControl(
+    cameraId: string,
+    request: HarborAssistantPackageDetectionControlRequest,
+  ): Observable<HarborAssistantPackageDetectionControlProjection> {
+    const payload: HarborAssistantPackageDetectionControlRequest = {
+      enabled: request.enabled,
+      stream_profile: request.stream_profile,
+    };
+    return this.withUserToken((options) => this.http.put<HarborAssistantPackageDetectionControlProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/package-detection/control`),
       payload,
       options,
     ));

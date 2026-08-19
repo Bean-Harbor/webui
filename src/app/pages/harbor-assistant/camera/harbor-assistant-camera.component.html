@@ -25,7 +25,9 @@
                 mat-stroked-button
                 data-testid="refresh-cameras"
                 type="button"
-                [disabled]="cameraLoading() || catDetectionWritePendingForSelectedCamera()"
+                [disabled]="cameraLoading()
+                  || catDetectionWritePendingForSelectedCamera()
+                  || packageDetectionWritePendingForSelectedCamera()"
                 (click)="refreshCameraDvr()"
               >
                 {{ cameraLoading() ? ('Refreshing' | translate) : ('Refresh cameras' | translate) }}
@@ -56,7 +58,8 @@
               aria-label="Live stream profile"
               [disabled]="liveStreamSwitching()
                 || hlsLiveStatus() === 'starting'
-                || catDetectionWritePendingForSelectedCamera()"
+                || catDetectionWritePendingForSelectedCamera()
+                || packageDetectionWritePendingForSelectedCamera()"
               [value]="selectedStreamProfile()"
               (valueChange)="selectStreamProfile($any($event))"
             >
@@ -93,6 +96,40 @@
               }
               @if (catDetectionError()) {
                 <span class="cat-detection-error">{{ catDetectionError() }}</span>
+              }
+            </div>
+            <div class="package-detection-controls">
+              @if (packageDetectionDesiredEnabled() !== null) {
+                <mat-slide-toggle
+                  data-testid="package-detection-toggle"
+                  [checked]="packageDetectionDesiredEnabled()"
+                  [disabled]="packageDetectionControlDisabled()"
+                  (change)="setPackageDetectionEnabled($event.checked)"
+                >
+                  {{ 'Package detection' | translate }}
+                </mat-slide-toggle>
+              } @else {
+                <button
+                  mat-stroked-button
+                  data-testid="package-detection-status-unknown"
+                  type="button"
+                  disabled
+                  [attr.aria-busy]="packageDetectionError() ? null : true"
+                >
+                  {{ (packageDetectionError()
+                    ? 'Package detection status unavailable.'
+                    : 'Loading package detection status...') | translate }}
+                </button>
+              }
+              @if (packageDetectionEffectiveStatus()) {
+                <span class="package-detection-status" data-testid="package-detection-status">
+                  {{ packageDetectionStatusLabel() }}
+                </span>
+              }
+              @if (packageDetectionError()) {
+                <span class="package-detection-error" data-testid="package-detection-error">
+                  {{ packageDetectionError() }}
+                </span>
               }
             </div>
 

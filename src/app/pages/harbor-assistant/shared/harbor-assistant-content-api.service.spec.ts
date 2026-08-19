@@ -17,6 +17,8 @@ import { HarborAssistantContentApiService } from 'app/pages/harbor-assistant/sha
 import {
   HarborAssistantCatDetectionControlProjection,
   HarborAssistantCatDetectionControlRequest,
+  HarborAssistantPackageDetectionControlProjection,
+  HarborAssistantPackageDetectionControlRequest,
   HarborAssistantSearchRequest,
   HarborAssistantSearchResponse,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
@@ -420,6 +422,8 @@ describe('Harbor Assistant content API service', () => {
     expect(typeof service.detectionJob).toBe('function');
     expect(typeof service.getCatDetectionControl).toBe('function');
     expect(typeof service.putCatDetectionControl).toBe('function');
+    expect(typeof service.getPackageDetectionControl).toBe('function');
+    expect(typeof service.putPackageDetectionControl).toBe('function');
     expect(service.startDetectionJob).toBeUndefined();
     expect(service.renewDetectionJob).toBeUndefined();
     expect(service.stopDetectionJob).toBeUndefined();
@@ -436,6 +440,45 @@ describe('Harbor Assistant content API service', () => {
     expect(source).toContain('export type HarborAssistantCatDetectionEffectiveStatus');
     expect(source).toContain('export interface HarborAssistantCatDetectionControlRequest');
     expect(source).toContain('export interface HarborAssistantCatDetectionControlProjection');
+    expect(source).toContain('export interface HarborAssistantPackageDetectionControlRequest');
+    expect(source).toContain('export interface HarborAssistantPackageDetectionControlProjection');
+  });
+
+  it('gets typed package detection control through the authenticated Gate path', async () => {
+    const response = packageDetectionControlProjection();
+    const promise = firstValueFrom(spectator.service.getPackageDetectionControl('camera/main'));
+    const request = httpMock.expectOne(
+      '/api/harbor-gate/api/beacon/cameras/camera%2Fmain/package-detection/control',
+    );
+
+    expect(request.request.method).toBe('GET');
+    expect(request.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
+    request.flush(response);
+
+    await expect(promise).resolves.toEqual(response);
+  });
+
+  it('puts only the typed package detection control request through the authenticated Gate path', async () => {
+    const payload = {
+      enabled: true,
+      stream_profile: 'sub',
+      ignored: 'not-forwarded',
+    } as HarborAssistantPackageDetectionControlRequest;
+    const response = packageDetectionControlProjection({
+      desired_enabled: true,
+      effective_status: 'starting',
+    });
+    const promise = firstValueFrom(spectator.service.putPackageDetectionControl('camera/main', payload));
+    const request = httpMock.expectOne(
+      '/api/harbor-gate/api/beacon/cameras/camera%2Fmain/package-detection/control',
+    );
+
+    expect(request.request.method).toBe('PUT');
+    expect(request.request.body).toEqual({ enabled: true, stream_profile: 'sub' });
+    expect(request.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
+    request.flush(response);
+
+    await expect(promise).resolves.toEqual(response);
   });
 
   it('gets typed cat detection control through the authenticated Gate path with an encoded camera ID', async () => {
@@ -675,4 +718,10 @@ function catDetectionControlProjection(
     message: null,
     ...overrides,
   };
+}
+
+function packageDetectionControlProjection(
+  overrides: Partial<HarborAssistantPackageDetectionControlProjection> = {},
+): HarborAssistantPackageDetectionControlProjection {
+  return catDetectionControlProjection(overrides);
 }
