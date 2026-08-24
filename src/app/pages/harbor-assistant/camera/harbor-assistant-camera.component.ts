@@ -204,9 +204,17 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   protected readonly actionMessage = signal<string | null>(null);
   protected readonly actionError = signal<string | null>(null);
   private readonly catDetectionWritePendingByCamera = signal<ReadonlyMap<string, number>>(new Map());
+  private readonly catDetectionWriteTargetByCamera = signal<ReadonlyMap<string, boolean>>(new Map());
   protected readonly catDetectionBusy = computed(() => this.catDetectionWritePendingForSelectedCamera());
   protected readonly catDetectionControlLoaded = signal(false);
   protected readonly catDetectionDesiredEnabled = signal<boolean | null>(null);
+  protected readonly catDetectionToggleChecked = computed(() => {
+    const deviceId = this.selectedCameraId();
+    return deviceId
+      ? this.catDetectionWriteTargetByCamera().get(deviceId) ?? this.catDetectionDesiredEnabled()
+      : this.catDetectionDesiredEnabled();
+  });
+
   protected readonly catDetectionEnabled = computed(() => this.catDetectionDesiredEnabled() === true);
   private readonly catDetectionTransientError = signal<string | null>(null);
   private readonly catDetectionWriteError = signal<{ cameraId: string; message: string } | null>(null);
@@ -240,12 +248,20 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly catDetectionReloadPendingCameraIds = new Set<string>();
   private readonly confirmedCatDetectionControls = new Map<string, HarborAssistantCatDetectionControlProjection>();
   private readonly packageDetectionWritePendingByCamera = signal<ReadonlyMap<string, number>>(new Map());
+  private readonly packageDetectionWriteTargetByCamera = signal<ReadonlyMap<string, boolean>>(new Map());
   protected readonly packageDetectionBusy = computed(() => (
     this.packageDetectionWritePendingForSelectedCamera()
   ));
 
   protected readonly packageDetectionControlLoaded = signal(false);
   protected readonly packageDetectionDesiredEnabled = signal<boolean | null>(null);
+  protected readonly packageDetectionToggleChecked = computed(() => {
+    const deviceId = this.selectedCameraId();
+    return deviceId
+      ? this.packageDetectionWriteTargetByCamera().get(deviceId) ?? this.packageDetectionDesiredEnabled()
+      : this.packageDetectionDesiredEnabled();
+  });
+
   private readonly packageDetectionTransientError = signal<string | null>(null);
   private readonly packageDetectionWriteError = signal<{ cameraId: string; message: string } | null>(null);
   protected readonly packageDetectionError = computed(() => {
@@ -479,6 +495,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     this.cameras.set(devices);
     if (selected !== currentSelection) {
+      this.clearDetectionWriteTargets();
       this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(selected));
     }
     this.selectedCameraId.set(selected);
@@ -489,6 +506,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   selectCamera(deviceId: string): void {
     if (deviceId !== this.selectedCameraId()) {
+      this.clearDetectionWriteTargets();
       this.stopLive(false);
       this.stopHlsWarmSession();
       this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(deviceId));
@@ -499,6 +517,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.lastGoodLiveFrameUrl.set(null);
     this.selectedMediaItem.set(null);
     this.refreshCameraDvr();
+  }
+
+  private clearDetectionWriteTargets(): void {
+    this.catDetectionWriteTargetByCamera.set(new Map());
+    this.packageDetectionWriteTargetByCamera.set(new Map());
   }
 
   selectStreamProfile(profile: HarborAssistantLiveStreamProfile): void {
@@ -867,6 +890,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const writeToken = ++this.catDetectionWriteToken;
     const observationToken = this.catDetectionToken;
     const confirmedProjection = this.confirmedCatDetectionControls.get(deviceId) ?? null;
+    const writeTargets = new Map(this.catDetectionWriteTargetByCamera());
+    writeTargets.set(deviceId, enabled);
+    this.catDetectionWriteTargetByCamera.set(writeTargets);
     const pendingWrites = new Map(this.catDetectionWritePendingByCamera());
     pendingWrites.set(deviceId, writeToken);
     this.catDetectionWritePendingByCamera.set(pendingWrites);
@@ -951,6 +977,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const pendingWrites = new Map(this.catDetectionWritePendingByCamera());
     pendingWrites.delete(deviceId);
     this.catDetectionWritePendingByCamera.set(pendingWrites);
+    const writeTargets = new Map(this.catDetectionWriteTargetByCamera());
+    writeTargets.delete(deviceId);
+    this.catDetectionWriteTargetByCamera.set(writeTargets);
     const reloadRequested = this.catDetectionReloadPendingCameraIds.delete(deviceId);
     if (this.destroyed || deviceId !== this.selectedCameraId()) {
       return;
@@ -1067,6 +1096,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.packageDetectionControlToken += 1;
     const writeToken = ++this.packageDetectionWriteToken;
     const confirmedProjection = this.confirmedPackageDetectionControls.get(deviceId) ?? null;
+    const writeTargets = new Map(this.packageDetectionWriteTargetByCamera());
+    writeTargets.set(deviceId, enabled);
+    this.packageDetectionWriteTargetByCamera.set(writeTargets);
     const pendingWrites = new Map(this.packageDetectionWritePendingByCamera());
     pendingWrites.set(deviceId, writeToken);
     this.packageDetectionWritePendingByCamera.set(pendingWrites);
@@ -1143,6 +1175,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const pendingWrites = new Map(this.packageDetectionWritePendingByCamera());
     pendingWrites.delete(deviceId);
     this.packageDetectionWritePendingByCamera.set(pendingWrites);
+    const writeTargets = new Map(this.packageDetectionWriteTargetByCamera());
+    writeTargets.delete(deviceId);
+    this.packageDetectionWriteTargetByCamera.set(writeTargets);
     const reloadRequested = this.packageDetectionReloadPendingCameraIds.delete(deviceId);
     if (this.destroyed || deviceId !== this.selectedCameraId()) {
       return;

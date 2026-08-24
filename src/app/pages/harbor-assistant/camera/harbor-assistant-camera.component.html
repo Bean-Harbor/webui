@@ -70,7 +70,7 @@
               @if (catDetectionDesiredEnabled() !== null) {
                 <mat-slide-toggle
                   data-testid="cat-detection-toggle"
-                  [checked]="catDetectionDesiredEnabled()"
+                  [checked]="catDetectionToggleChecked()"
                   [disabled]="catDetectionControlDisabled()"
                   (change)="setCatDetectionEnabled($event.checked)"
                 >
@@ -102,7 +102,7 @@
               @if (packageDetectionDesiredEnabled() !== null) {
                 <mat-slide-toggle
                   data-testid="package-detection-toggle"
-                  [checked]="packageDetectionDesiredEnabled()"
+                  [checked]="packageDetectionToggleChecked()"
                   [disabled]="packageDetectionControlDisabled()"
                   (change)="setPackageDetectionEnabled($event.checked)"
                 >

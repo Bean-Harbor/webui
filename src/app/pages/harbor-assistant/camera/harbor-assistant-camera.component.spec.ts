@@ -706,12 +706,16 @@ describe('Harbor Assistant camera component', () => {
   }));
 
   it('restores package state and asks the user to disable cat detection after a 409 conflict', fakeAsync(() => {
-    api.putPackageDetectionControl = jest.fn(() => throwError(() => Object.assign(
-      new Error('detector conflict'),
-      { status: 409 },
-    )));
+    const controlResponse$ = new Subject<HarborAssistantPackageDetectionControlProjection>();
+    api.putPackageDetectionControl = jest.fn(() => controlResponse$.asObservable());
     spectator = createComponent();
-    spectator.component.setPackageDetectionEnabled(true);
+    spectator.click('[data-testid="package-detection-toggle"] button');
+    spectator.detectChanges();
+
+    expect(spectator.query<HTMLButtonElement>('[data-testid="package-detection-toggle"] button')
+      ?.getAttribute('aria-checked')).toBe('true');
+
+    controlResponse$.error(Object.assign(new Error('detector conflict'), { status: 409 }));
     spectator.detectChanges();
 
     expect(spectator.query<HTMLButtonElement>('[data-testid="package-detection-toggle"] button')
@@ -723,12 +727,16 @@ describe('Harbor Assistant camera component', () => {
   }));
 
   it('restores cat state and asks the user to disable package detection after a 409 conflict', fakeAsync(() => {
-    api.putCatDetectionControl = jest.fn(() => throwError(() => Object.assign(
-      new Error('detector conflict'),
-      { status: 409 },
-    )));
+    const controlResponse$ = new Subject<HarborAssistantCatDetectionControlProjection>();
+    api.putCatDetectionControl = jest.fn(() => controlResponse$.asObservable());
     spectator = createComponent();
-    spectator.component.setCatDetectionEnabled(true);
+    spectator.click('[data-testid="cat-detection-toggle"] button');
+    spectator.detectChanges();
+
+    expect(spectator.query<HTMLButtonElement>('[data-testid="cat-detection-toggle"] button')
+      ?.getAttribute('aria-checked')).toBe('true');
+
+    controlResponse$.error(Object.assign(new Error('detector conflict'), { status: 409 }));
     spectator.detectChanges();
 
     expect(spectator.query<HTMLButtonElement>('[data-testid="cat-detection-toggle"] button')
