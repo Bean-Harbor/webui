@@ -14,6 +14,7 @@ import {
   HarborAssistantCameraLiveSessionResponse,
   HarborAssistantCatDetectionControlProjection,
   HarborAssistantPackageDetectionControlProjection,
+  HarborAssistantPackageEventConfigProjection,
   HarborAssistantDetectionJobResponse,
   HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
@@ -58,6 +59,19 @@ describe('Harbor Assistant camera component', () => {
       cameraLiveStatus: jest.fn(() => of(liveSession())),
       harborLinkCapabilities: jest.fn(() => of(harborLinkCapabilities())),
       detectionJobForCamera: jest.fn(() => of(detectionJob({ managed_by_live: true }))),
+      packageDetectionObservationForCamera: jest.fn(() => of(detectionJob({
+        managed_by_live: true,
+        target_labels: ['package'],
+        latest_result: {
+          ...detectionJob().latest_result!,
+          target_label: 'package',
+          detections: [{
+            ...detectionJob().latest_result!.detections[0],
+            label: 'package',
+            confidence: 0.88,
+          }],
+        },
+      }))),
       getCatDetectionControl: jest.fn(() => of(catDetectionControlProjection())),
       putCatDetectionControl: jest.fn((
         _cameraId: string,
@@ -79,6 +93,14 @@ describe('Harbor Assistant camera component', () => {
         desired_stream_profile: request.stream_profile,
         effective_status: request.enabled ? 'running' : 'stopped',
         effective_stream_profile: request.enabled ? request.stream_profile : null,
+      }))),
+      getPackageEventConfig: jest.fn(() => of(packageEventConfigProjection())),
+      putPackageEventConfig: jest.fn((
+        _cameraId: string,
+        request: { enabled: boolean; zone: { left: number; top: number; right: number; bottom: number } },
+      ) => of(packageEventConfigProjection({
+        enabled: request.enabled,
+        zone: request.zone,
       }))),
       detectionJob: jest.fn(() => of(detectionJob())),
       createSnapshotTask: jest.fn(() => snapshotSubject$.asObservable()),
@@ -689,6 +711,21 @@ describe('Harbor Assistant camera component', () => {
     expect(api.getPackageDetectionControl).toHaveBeenCalledWith('cam-1');
     expect(spectator.query('[data-testid="cat-detection-toggle"]')).not.toBeNull();
     expect(spectator.query('[data-testid="package-detection-toggle"]')).not.toBeNull();
+    discardPeriodicTasks();
+  }));
+
+  it('shows the package event config read error when the form cannot load', fakeAsync(() => {
+    api.getPackageEventConfig = jest.fn(() => throwError(() => Object.assign(
+      new Error('package event config forbidden'),
+      { status: 403 },
+    )));
+    spectator = createComponent();
+    spectator.detectChanges();
+
+    expect(spectator.query('[data-testid="package-event-config"]')).toBeNull();
+    expect(spectator.query('[data-testid="package-event-config-error"]')).toHaveText(
+      'Unable to read package alert settings.',
+    );
     discardPeriodicTasks();
   }));
 
@@ -1717,6 +1754,497 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('observes and draws package detections when package detection is enabled', fakeAsync(() => {
+    spectator = createComponent();
+    const clearRect = jest.fn();
+    const fillText = jest.fn();
+    const strokeRect = jest.fn();
+    const canvas = {
+      getContext: jest.fn(() => ({
+        clearRect,
+        fillRect: jest.fn(),
+        fillText,
+        measureText: jest.fn(() => ({ width: 60 })),
+        strokeRect,
+      } as unknown as CanvasRenderingContext2D)),
+      height: 0,
+      width: 0,
+    } as unknown as HTMLCanvasElement;
+    const componentState = spectator.component as unknown as {
+      catDetectionOverlay: { nativeElement: HTMLCanvasElement };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      liveVideo: { nativeElement: HTMLVideoElement };
+      setPackageDetectionEnabled: (enabled: boolean) => void;
+      translate: { instant: (key: string) => string };
+    };
+    componentState.catDetectionOverlay = { nativeElement: canvas };
+    componentState.liveVideo = {
+      nativeElement: fakeLiveVideo({ videoHeight: 720, videoWidth: 1280 }),
+    };
+    componentState.translate = {
+      instant: (key) => (key === 'Package' ? '包裹' : key),
+    };
+    componentState.hlsLiveStatus.set('live');
+
+    componentState.setPackageDetectionEnabled(true);
+
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledWith('cam-1', 'sub');
+    expect(strokeRect).toHaveBeenCalled();
+    expect(fillText).toHaveBeenCalledWith('包裹 88%', expect.any(Number), expect.any(Number));
+    clearRect.mockClear();
+    componentState.setPackageDetectionEnabled(false);
+    expect(clearRect).toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
+  it('refreshes enabled package alert status after a successful detection observation', fakeAsync(() => {
+    const statusRefresh$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true,
+      effective_status: 'running',
+      effective_stream_profile: 'sub',
+    })));
+    api.getPackageEventConfig = jest.fn()
+      .mockReturnValueOnce(of(packageEventConfigProjection({
+        enabled: true,
+        phase: 'present',
+        delivered: false,
+      })))
+      .mockReturnValueOnce(statusRefresh$.asObservable())
+      .mockReturnValue(of(packageEventConfigProjection({
+        enabled: true,
+        phase: 'present',
+        delivered: true,
+      })));
+
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
+      packageEventConfigBusy: () => boolean;
+      packageEventConfigLoaded: () => boolean;
+      packageEventPhaseLabel: () => string;
+    };
+
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledWith('cam-1', 'sub');
+    expect(api.getPackageEventConfig).toHaveBeenCalledTimes(2);
+    expect(componentState.packageEventConfig()?.delivered).toBe(false);
+    expect(componentState.packageEventPhaseLabel()).toBe('Package alert pending.');
+    expect(componentState.packageEventConfigLoaded()).toBe(true);
+    expect(componentState.packageEventConfigBusy()).toBe(false);
+
+    statusRefresh$.next(packageEventConfigProjection({
+      enabled: true,
+      phase: 'present',
+      delivered: true,
+    }));
+    statusRefresh$.complete();
+
+    expect(componentState.packageEventConfig()?.delivered).toBe(true);
+    expect(componentState.packageEventPhaseLabel()).toBe('Package alert delivered.');
+    expect(componentState.packageEventConfigLoaded()).toBe(true);
+    expect(componentState.packageEventConfigBusy()).toBe(false);
+    discardPeriodicTasks();
+  }));
+
+  it('keeps unsaved delivery-zone edits while package alert status refreshes without overlap', fakeAsync(() => {
+    const statusRefresh$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true,
+      effective_status: 'running',
+      effective_stream_profile: 'sub',
+    })));
+    api.getPackageEventConfig = jest.fn()
+      .mockReturnValueOnce(of(packageEventConfigProjection({ enabled: true })))
+      .mockReturnValueOnce(statusRefresh$.asObservable())
+      .mockReturnValue(of(packageEventConfigProjection({
+        enabled: true,
+        phase: 'present',
+        delivered: true,
+      })));
+    spectator = createComponent();
+    const editedZone = {
+      enabled: true,
+      left: 0.2,
+      top: 0.25,
+      right: 0.8,
+      bottom: 0.9,
+    };
+    const componentState = spectator.component as unknown as {
+      packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
+      packageEventForm: {
+        getRawValue: () => typeof editedZone;
+        setValue: (value: typeof editedZone) => void;
+      };
+    };
+    componentState.packageEventForm.setValue(editedZone);
+
+    tick(250);
+
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(2);
+    expect(api.getPackageEventConfig).toHaveBeenCalledTimes(2);
+    statusRefresh$.next(packageEventConfigProjection({
+      enabled: true,
+      phase: 'present',
+      delivered: true,
+    }));
+    statusRefresh$.complete();
+
+    expect(componentState.packageEventConfig()?.delivered).toBe(true);
+    expect(componentState.packageEventForm.getRawValue()).toEqual(editedZone);
+    discardPeriodicTasks();
+  }));
+
+  it('keeps an in-flight package alert save valid while background status refreshes', fakeAsync(() => {
+    const statusRefresh$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    const save$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true,
+      effective_status: 'running',
+      effective_stream_profile: 'sub',
+    })));
+    api.getPackageEventConfig = jest.fn()
+      .mockReturnValueOnce(of(packageEventConfigProjection({ enabled: true })))
+      .mockReturnValueOnce(statusRefresh$.asObservable())
+      .mockReturnValue(of(packageEventConfigProjection({ enabled: true })));
+    api.putPackageEventConfig = jest.fn(() => save$.asObservable());
+    spectator = createComponent();
+    const savedZone = {
+      enabled: true,
+      left: 0.2,
+      top: 0.25,
+      right: 0.8,
+      bottom: 0.9,
+    };
+    const componentState = spectator.component as unknown as {
+      packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
+      packageEventConfigBusy: () => boolean;
+      packageEventForm: {
+        getRawValue: () => typeof savedZone;
+        setValue: (value: typeof savedZone) => void;
+      };
+      savePackageEventConfig: () => void;
+    };
+    componentState.packageEventForm.setValue(savedZone);
+    componentState.savePackageEventConfig();
+
+    tick(250);
+
+    expect(componentState.packageEventConfigBusy()).toBe(true);
+    expect(api.getPackageEventConfig).toHaveBeenCalledTimes(2);
+    statusRefresh$.next(packageEventConfigProjection({
+      enabled: true,
+      phase: 'present',
+      delivered: true,
+    }));
+    statusRefresh$.complete();
+    save$.next(packageEventConfigProjection({
+      enabled: true,
+      zone: {
+        left: savedZone.left,
+        top: savedZone.top,
+        right: savedZone.right,
+        bottom: savedZone.bottom,
+      },
+      revision: 2,
+      phase: 'present',
+      delivered: false,
+    }));
+    save$.complete();
+
+    expect(componentState.packageEventConfigBusy()).toBe(false);
+    expect(componentState.packageEventConfig()?.revision).toBe(2);
+    expect(componentState.packageEventConfig()?.zone).toEqual({
+      left: savedZone.left,
+      top: savedZone.top,
+      right: savedZone.right,
+      bottom: savedZone.bottom,
+    });
+    expect(componentState.packageEventConfig()?.delivered).toBe(false);
+    expect(componentState.packageEventForm.getRawValue()).toEqual(savedZone);
+    discardPeriodicTasks();
+  }));
+
+  it('ignores a late package status response after package alerts are disabled', fakeAsync(() => {
+    const statusRefresh$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    const save$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true,
+      effective_status: 'running',
+      effective_stream_profile: 'sub',
+    })));
+    api.getPackageEventConfig = jest.fn()
+      .mockReturnValueOnce(of(packageEventConfigProjection({ enabled: true })))
+      .mockReturnValueOnce(statusRefresh$.asObservable());
+    api.putPackageEventConfig = jest.fn(() => save$.asObservable());
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
+      packageEventForm: {
+        setValue: (value: { enabled: boolean; left: number; top: number; right: number; bottom: number }) => void;
+      };
+      savePackageEventConfig: () => void;
+    };
+    componentState.packageEventForm.setValue({
+      enabled: false,
+      left: 0,
+      top: 0,
+      right: 1,
+      bottom: 1,
+    });
+
+    componentState.savePackageEventConfig();
+    save$.next(packageEventConfigProjection({ enabled: false }));
+    save$.complete();
+    statusRefresh$.next(packageEventConfigProjection({
+      enabled: true,
+      phase: 'present',
+      delivered: true,
+    }));
+    statusRefresh$.complete();
+
+    expect(componentState.packageEventConfig()?.enabled).toBe(false);
+    expect(componentState.packageEventConfig()?.phase).toBe('idle');
+    expect(componentState.packageEventConfig()?.delivered).toBe(false);
+    discardPeriodicTasks();
+  }));
+
+  it('ignores a late package status response from the previously selected camera', fakeAsync(() => {
+    const firstCameraStatus$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    let firstCameraConfigReads = 0;
+    api.cameraState = jest.fn(() => of(twoCameraState()));
+    api.getPackageDetectionControl = jest.fn((cameraId: string) => of(packageDetectionControlProjection({
+      camera_id: cameraId,
+      desired_enabled: cameraId === 'cam-1',
+      effective_status: cameraId === 'cam-1' ? 'running' : 'stopped',
+      effective_stream_profile: cameraId === 'cam-1' ? 'sub' : null,
+    })));
+    api.getPackageEventConfig = jest.fn((cameraId: string) => {
+      if (cameraId === 'cam-1') {
+        firstCameraConfigReads += 1;
+        return firstCameraConfigReads === 1
+          ? of(packageEventConfigProjection({ enabled: true }))
+          : firstCameraStatus$.asObservable();
+      }
+      return of(packageEventConfigProjection({ camera_id: cameraId, enabled: true }));
+    });
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
+    };
+
+    spectator.component.selectCamera('cam-2');
+    firstCameraStatus$.next(packageEventConfigProjection({
+      enabled: true,
+      phase: 'present',
+      delivered: true,
+    }));
+    firstCameraStatus$.complete();
+
+    expect(componentState.packageEventConfig()?.camera_id).toBe('cam-2');
+    expect(componentState.packageEventConfig()?.phase).toBe('idle');
+    expect(componentState.packageEventConfig()?.delivered).toBe(false);
+    discardPeriodicTasks();
+  }));
+
+  it('ignores a late package status response after the component is destroyed', fakeAsync(() => {
+    const statusRefresh$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true,
+      effective_status: 'running',
+      effective_stream_profile: 'sub',
+    })));
+    api.getPackageEventConfig = jest.fn()
+      .mockReturnValueOnce(of(packageEventConfigProjection({
+        enabled: true,
+        phase: 'present',
+        delivered: false,
+      })))
+      .mockReturnValueOnce(statusRefresh$.asObservable());
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
+    };
+
+    spectator.fixture.destroy();
+    statusRefresh$.next(packageEventConfigProjection({
+      enabled: true,
+      phase: 'present',
+      delivered: true,
+    }));
+    statusRefresh$.complete();
+
+    expect(componentState.packageEventConfig()?.delivered).toBe(false);
+    discardPeriodicTasks();
+  }));
+
+  it('preserves package alert status after a refresh failure and continues observation polling', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true,
+      effective_status: 'running',
+      effective_stream_profile: 'sub',
+    })));
+    api.getPackageEventConfig = jest.fn()
+      .mockReturnValueOnce(of(packageEventConfigProjection({
+        enabled: true,
+        phase: 'present',
+        delivered: false,
+      })))
+      .mockReturnValueOnce(throwError(() => new Error('status refresh failed')))
+      .mockReturnValueOnce(of(packageEventConfigProjection({
+        enabled: true,
+        phase: 'present',
+        delivered: true,
+      })))
+      .mockReturnValue(of(packageEventConfigProjection({
+        enabled: true,
+        phase: 'present',
+        delivered: true,
+      })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
+      packageEventConfigError: () => string | null;
+    };
+
+    expect(componentState.packageEventConfig()?.delivered).toBe(false);
+    expect(componentState.packageEventConfigError()).toBeNull();
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(1);
+
+    tick(250);
+
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(2);
+    expect(api.getPackageEventConfig).toHaveBeenCalledTimes(3);
+    expect(componentState.packageEventConfig()?.delivered).toBe(true);
+    expect(componentState.packageEventConfigError()).toBeNull();
+    discardPeriodicTasks();
+  }));
+
+  it('keeps package detection enabled and retries while its observation is not found', fakeAsync(() => {
+    api.packageDetectionObservationForCamera = jest.fn(() => throwError(() => Object.assign(
+      new Error('package observation not found'),
+      { status: 404 },
+    )));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageDetectionEnabled: () => boolean;
+      packageDetectionError: () => string | null;
+      packageDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      setPackageDetectionEnabled: (enabled: boolean) => void;
+    };
+
+    componentState.setPackageDetectionEnabled(true);
+
+    expect(componentState.packageDetectionEnabled()).toBe(true);
+    expect(componentState.packageDetectionJob()).toBeNull();
+    expect(componentState.packageDetectionError()).toBeNull();
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(1);
+    tick(499);
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(1);
+    tick(1);
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(2);
+    componentState.setPackageDetectionEnabled(false);
+    discardPeriodicTasks();
+  }));
+
+  it('saves one normalized package delivery zone', fakeAsync(() => {
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageEventForm: {
+        setValue: (value: { enabled: boolean; left: number; top: number; right: number; bottom: number }) => void;
+      };
+      savePackageEventConfig: () => void;
+    };
+    componentState.packageEventForm.setValue({
+      enabled: true,
+      left: 0.2,
+      top: 0.25,
+      right: 0.8,
+      bottom: 0.9,
+    });
+
+    componentState.savePackageEventConfig();
+    flushMicrotasks();
+
+    expect(api.putPackageEventConfig).toHaveBeenCalledWith('cam-1', {
+      enabled: true,
+      zone: {
+        left: 0.2,
+        top: 0.25,
+        right: 0.8,
+        bottom: 0.9,
+      },
+    });
+    discardPeriodicTasks();
+  }));
+
+  it('shows a transient package observation error and retries without changing the control', fakeAsync(() => {
+    api.packageDetectionObservationForCamera = jest.fn(() => throwError(() => Object.assign(
+      new Error('package observation failed'),
+      { status: 500 },
+    )));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageDetectionEnabled: () => boolean;
+      packageDetectionError: () => string | null;
+      setPackageDetectionEnabled: (enabled: boolean) => void;
+    };
+
+    componentState.setPackageDetectionEnabled(true);
+
+    expect(componentState.packageDetectionEnabled()).toBe(true);
+    expect(componentState.packageDetectionError()).toBe('Unable to observe package detection.');
+    expect(api.putPackageDetectionControl).toHaveBeenCalledTimes(1);
+    tick(1_999);
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(1);
+    tick(1);
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(2);
+    expect(api.putPackageDetectionControl).toHaveBeenCalledTimes(1);
+    componentState.setPackageDetectionEnabled(false);
+    discardPeriodicTasks();
+  }));
+
+  it('ignores a delayed package observation after package detection is turned off', fakeAsync(() => {
+    const observation$ = new Subject<HarborAssistantDetectionJobResponse>();
+    api.packageDetectionObservationForCamera = jest.fn(() => observation$.asObservable());
+    spectator = createComponent();
+    const strokeRect = jest.fn();
+    const canvas = {
+      getContext: jest.fn(() => ({
+        clearRect: jest.fn(),
+        fillRect: jest.fn(),
+        fillText: jest.fn(),
+        measureText: jest.fn(() => ({ width: 60 })),
+        strokeRect,
+      } as unknown as CanvasRenderingContext2D)),
+      height: 0,
+      width: 0,
+    } as unknown as HTMLCanvasElement;
+    const componentState = spectator.component as unknown as {
+      catDetectionOverlay: { nativeElement: HTMLCanvasElement };
+      liveVideo: { nativeElement: HTMLVideoElement };
+      packageDetectionJob: () => HarborAssistantDetectionJobResponse | null;
+      setPackageDetectionEnabled: (enabled: boolean) => void;
+    };
+    componentState.catDetectionOverlay = { nativeElement: canvas };
+    componentState.liveVideo = {
+      nativeElement: fakeLiveVideo({ videoHeight: 720, videoWidth: 1280 }),
+    };
+
+    componentState.setPackageDetectionEnabled(true);
+    componentState.setPackageDetectionEnabled(false);
+    observation$.next(detectionJob({
+      target_labels: ['package'],
+      latest_result: {
+        ...detectionJob().latest_result!,
+        target_label: 'package',
+      },
+    }));
+
+    expect(componentState.packageDetectionJob()).toBeNull();
+    expect(strokeRect).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
   it('shows running status until a detection result identifies the provider', fakeAsync(() => {
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
@@ -1737,7 +2265,7 @@ describe('Harbor Assistant camera component', () => {
         status: 'running',
         provider: 'CPUExecutionProvider',
         frames_processed: 0,
-        cat_frames: 0,
+        target_frames: 0,
         average_inference_ms: 0,
         p95_inference_ms: 0,
         uptime_ms: 0,
@@ -1777,6 +2305,34 @@ describe('Harbor Assistant camera component', () => {
     spectator.component.startLive();
 
     expect(api.startCameraLiveSession).toHaveBeenCalledTimes(1);
+    discardPeriodicTasks();
+  }));
+
+  it('resumes package detection observation after live playback restarts', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true,
+      effective_status: 'running',
+      effective_stream_profile: 'sub',
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      hlsLiveSession: { set: (value: HarborAssistantCameraLiveSessionResponse) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+    };
+    componentState.hlsLiveSession.set(liveSession());
+    componentState.hlsLiveStatus.set('live');
+    api.getPackageDetectionControl?.mockClear();
+    api.packageDetectionObservationForCamera?.mockClear();
+    api.putPackageDetectionControl?.mockClear();
+
+    spectator.component.stopLive(false);
+    spectator.component.startLive();
+
+    expect(api.getPackageDetectionControl).toHaveBeenCalledTimes(1);
+    expect(api.getPackageDetectionControl).toHaveBeenCalledWith('cam-1');
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(1);
+    expect(api.packageDetectionObservationForCamera).toHaveBeenCalledWith('cam-1', 'sub');
+    expect(api.putPackageDetectionControl).not.toHaveBeenCalled();
     discardPeriodicTasks();
   }));
 
@@ -4401,6 +4957,31 @@ function packageDetectionControlProjection(
   options: Partial<HarborAssistantPackageDetectionControlProjection> = {},
 ): HarborAssistantPackageDetectionControlProjection {
   return catDetectionControlProjection(options);
+}
+
+function packageEventConfigProjection(
+  options: Partial<HarborAssistantPackageEventConfigProjection> = {},
+): HarborAssistantPackageEventConfigProjection {
+  return {
+    camera_id: 'cam-1',
+    explicit: true,
+    enabled: false,
+    zone: {
+      left: 0,
+      top: 0,
+      right: 1,
+      bottom: 1,
+    },
+    confirm_frames: 3,
+    confirm_window_ms: 3_000,
+    max_result_age_ms: 3_000,
+    revision: 1,
+    phase: 'idle',
+    event_id: null,
+    delivered: false,
+    last_error: null,
+    ...options,
+  };
 }
 
 function detectionJob(

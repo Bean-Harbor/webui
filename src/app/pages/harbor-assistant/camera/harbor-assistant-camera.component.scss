@@ -188,6 +188,47 @@
   overflow-wrap: anywhere;
 }
 
+.package-event-config {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.package-zone-fields {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(72px, 96px));
+
+  label {
+    display: grid;
+    font-size: 0.75rem;
+    gap: 4px;
+  }
+
+  input {
+    background: var(--bg1);
+    border: 1px solid var(--lines);
+    border-radius: 4px;
+    color: inherit;
+    min-height: 34px;
+    padding: 4px 8px;
+    width: 100%;
+  }
+}
+
+.package-event-status {
+  color: var(--fg2);
+  font-size: 0.82rem;
+}
+
+@media (max-width: 640px) {
+  .package-zone-fields {
+    grid-template-columns: repeat(2, minmax(72px, 1fr));
+    width: 100%;
+  }
+}
+
 .dvr-preview-row {
   align-items: start;
   display: grid;

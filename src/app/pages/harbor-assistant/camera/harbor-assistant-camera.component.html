@@ -132,6 +132,49 @@
                 </span>
               }
             </div>
+            @if (packageEventConfigError()) {
+              <span class="package-detection-error" data-testid="package-event-config-error">
+                {{ packageEventConfigError() }}
+              </span>
+            }
+            @if (packageEventConfigLoaded()) {
+              <form
+                class="package-event-config"
+                data-testid="package-event-config"
+                [formGroup]="packageEventForm"
+                (ngSubmit)="savePackageEventConfig()"
+              >
+                <mat-slide-toggle formControlName="enabled">
+                  {{ 'Package alerts' | translate }}
+                </mat-slide-toggle>
+                <div class="package-zone-fields">
+                  <label>
+                    <span>{{ 'Left' | translate }}</span>
+                    <input type="number" min="0" max="1" step="0.05" formControlName="left">
+                  </label>
+                  <label>
+                    <span>{{ 'Top' | translate }}</span>
+                    <input type="number" min="0" max="1" step="0.05" formControlName="top">
+                  </label>
+                  <label>
+                    <span>{{ 'Right' | translate }}</span>
+                    <input type="number" min="0" max="1" step="0.05" formControlName="right">
+                  </label>
+                  <label>
+                    <span>{{ 'Bottom' | translate }}</span>
+                    <input type="number" min="0" max="1" step="0.05" formControlName="bottom">
+                  </label>
+                </div>
+                <button
+                  mat-stroked-button
+                  type="submit"
+                  [disabled]="packageEventConfigBusy() || packageEventForm.invalid"
+                >
+                  {{ 'Save delivery zone' | translate }}
+                </button>
+                <span class="package-event-status">{{ packageEventPhaseLabel() }}</span>
+              </form>
+            }
 
             <div class="dvr-preview-row">
               <div class="live-stack">

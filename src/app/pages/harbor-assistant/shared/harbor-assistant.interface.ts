@@ -265,7 +265,7 @@ export interface HarborAssistantDetectionMetrics {
   status: string;
   provider: string;
   frames_processed: number;
-  cat_frames: number;
+  target_frames: number;
   average_inference_ms: number;
   p95_inference_ms: number;
   uptime_ms: number;
@@ -316,6 +316,35 @@ export interface HarborAssistantPackageDetectionControlProjection {
   job_id: string | null;
   updated_at: string | null;
   message: string | null;
+}
+
+export interface HarborAssistantPackageDeliveryZone {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface HarborAssistantPackageEventConfigRequest {
+  enabled: boolean;
+  zone: HarborAssistantPackageDeliveryZone;
+}
+
+export type HarborAssistantPackagePresencePhase = 'idle' | 'candidate' | 'present';
+
+export interface HarborAssistantPackageEventConfigProjection {
+  camera_id: string;
+  explicit: boolean;
+  enabled: boolean;
+  zone: HarborAssistantPackageDeliveryZone;
+  confirm_frames: number;
+  confirm_window_ms: number;
+  max_result_age_ms: number;
+  revision: number;
+  phase: HarborAssistantPackagePresencePhase;
+  event_id: string | null;
+  delivered: boolean;
+  last_error: string | null;
 }
 
 export interface HarborAssistantDetectionJobResponse {
