@@ -1846,6 +1846,44 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('shows package removal confirmation while absence is still being verified', fakeAsync(() => {
+    api.getPackageEventConfig = jest.fn(() => of(packageEventConfigProjection({
+      enabled: true,
+      phase: 'removing',
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageEventPhaseLabel: () => string;
+    };
+
+    expect(componentState.packageEventPhaseLabel()).toBe('Confirming package removal...');
+    discardPeriodicTasks();
+  }));
+
+  it('shows the latest package removal delivery status after rearming', fakeAsync(() => {
+    api.getPackageEventConfig = jest.fn(() => of(packageEventConfigProjection({
+      enabled: true,
+      phase: 'idle',
+      removal_event_id: 'package_removed_test',
+      removal_delivered: false,
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageEventConfig: { set: (value: HarborAssistantPackageEventConfigProjection) => void };
+      packageEventPhaseLabel: () => string;
+    };
+
+    expect(componentState.packageEventPhaseLabel()).toBe('Package removal alert pending.');
+    componentState.packageEventConfig.set(packageEventConfigProjection({
+      enabled: true,
+      phase: 'idle',
+      removal_event_id: 'package_removed_test',
+      removal_delivered: true,
+    }));
+    expect(componentState.packageEventPhaseLabel()).toBe('Package removal alert delivered.');
+    discardPeriodicTasks();
+  }));
+
   it('keeps unsaved delivery-zone edits while package alert status refreshes without overlap', fakeAsync(() => {
     const statusRefresh$ = new Subject<HarborAssistantPackageEventConfigProjection>();
     api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
@@ -4980,6 +5018,12 @@ function packageEventConfigProjection(
     event_id: null,
     delivered: false,
     last_error: null,
+    removal_event_id: null,
+    removal_instance_id: null,
+    removal_appeared_event_id: null,
+    removed_frame_epoch_ms: null,
+    removal_delivered: false,
+    removal_last_error: null,
     ...options,
   };
 }

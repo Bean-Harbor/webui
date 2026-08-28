@@ -1229,7 +1229,14 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         return this.packageEventConfig()?.delivered
           ? this.translate.instant('Package alert delivered.')
           : this.translate.instant('Package alert pending.');
+      case 'removing':
+        return this.translate.instant('Confirming package removal...');
       default:
+        if (this.packageEventConfig()?.removal_event_id) {
+          return this.packageEventConfig()?.removal_delivered
+            ? this.translate.instant('Package removal alert delivered.')
+            : this.translate.instant('Package removal alert pending.');
+        }
         return this.translate.instant('Waiting for package.');
     }
   }

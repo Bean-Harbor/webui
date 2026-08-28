@@ -330,7 +330,7 @@ export interface HarborAssistantPackageEventConfigRequest {
   zone: HarborAssistantPackageDeliveryZone;
 }
 
-export type HarborAssistantPackagePresencePhase = 'idle' | 'candidate' | 'present';
+export type HarborAssistantPackagePresencePhase = 'idle' | 'candidate' | 'present' | 'removing';
 
 export interface HarborAssistantPackageEventConfigProjection {
   camera_id: string;
@@ -345,6 +345,12 @@ export interface HarborAssistantPackageEventConfigProjection {
   event_id: string | null;
   delivered: boolean;
   last_error: string | null;
+  removal_event_id: string | null;
+  removal_instance_id: string | null;
+  removal_appeared_event_id: string | null;
+  removed_frame_epoch_ms: number | null;
+  removal_delivered: boolean;
+  removal_last_error: string | null;
 }
 
 export interface HarborAssistantDetectionJobResponse {
