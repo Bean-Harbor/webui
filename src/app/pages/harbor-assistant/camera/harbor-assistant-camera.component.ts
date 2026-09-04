@@ -1231,6 +1231,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
           : this.translate.instant('Package alert pending.');
       case 'removing':
         return this.translate.instant('Confirming package removal...');
+      case 'unknown':
+        return this.translate.instant('Package status cannot be determined.');
       default:
         if (this.packageEventConfig()?.removal_event_id) {
           return this.packageEventConfig()?.removal_delivered
@@ -1314,8 +1316,17 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         this.packageEventConfig.set({
           ...current,
           phase: projection.phase,
+          observability: projection.observability,
           delivered: projection.delivered,
           last_error: projection.last_error,
+          removal_event_id: projection.removal_event_id,
+          removal_instance_id: projection.removal_instance_id,
+          removal_appeared_event_id: projection.removal_appeared_event_id,
+          removed_frame_epoch_ms: projection.removed_frame_epoch_ms,
+          removal_delivered: projection.removal_delivered,
+          removal_last_error: projection.removal_last_error,
+          removal_recording_artifacts: projection.removal_recording_artifacts,
+          removal_recording_error: projection.removal_recording_error,
         });
         this.packageEventConfigError.set(projection.last_error);
       },
@@ -1483,6 +1494,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
             this.translate.instant('Unable to observe package detection.'),
           );
         }
+        this.refreshPackageEventStatus(deviceId, token);
         this.schedulePackageDetectionPoll(deviceId, streamProfile, token, notFound ? 500 : 2_000);
       },
     });

@@ -4287,6 +4287,7 @@
   "Bottom": "底部",
   "Confirming package...": "正在确认包裹...",
   "Confirming package removal...": "正在确认包裹移除...",
+  "Package status cannot be determined.": "暂时无法判断包裹状态。",
   "Delivery zone must have positive width and height.": "投递区必须具有有效的宽度和高度。",
   "Save delivery zone": "保存投递区",
   "Unable to read package alert settings.": "无法读取包裹提醒设置。",

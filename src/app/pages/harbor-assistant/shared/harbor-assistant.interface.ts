@@ -259,6 +259,9 @@ export interface HarborAssistantDetectionResult {
   inference_ms: number;
   detection_count: number;
   detections: HarborAssistantDetection[];
+  camera_healthy?: boolean;
+  frame_observable?: boolean;
+  frame_observability_reason?: string;
 }
 
 export interface HarborAssistantDetectionMetrics {
@@ -330,7 +333,15 @@ export interface HarborAssistantPackageEventConfigRequest {
   zone: HarborAssistantPackageDeliveryZone;
 }
 
-export type HarborAssistantPackagePresencePhase = 'idle' | 'candidate' | 'present' | 'removing';
+export type HarborAssistantPackagePresencePhase = 'idle' | 'candidate' | 'present' | 'removing' | 'unknown';
+export type HarborAssistantPackageObservability = 'unknown' | 'healthy' | 'offline' | 'occluded' | 'discontinuous';
+
+export interface HarborAssistantPackageRecordingArtifact {
+  artifact_id: string;
+  mime_type: string;
+  byte_size: number;
+  preview_url: string;
+}
 
 export interface HarborAssistantPackageEventConfigProjection {
   camera_id: string;
@@ -340,8 +351,10 @@ export interface HarborAssistantPackageEventConfigProjection {
   confirm_frames: number;
   confirm_window_ms: number;
   max_result_age_ms: number;
+  max_observation_gap_ms: number;
   revision: number;
   phase: HarborAssistantPackagePresencePhase;
+  observability: HarborAssistantPackageObservability;
   event_id: string | null;
   delivered: boolean;
   last_error: string | null;
@@ -351,6 +364,8 @@ export interface HarborAssistantPackageEventConfigProjection {
   removed_frame_epoch_ms: number | null;
   removal_delivered: boolean;
   removal_last_error: string | null;
+  removal_recording_artifacts: HarborAssistantPackageRecordingArtifact[];
+  removal_recording_error: string | null;
 }
 
 export interface HarborAssistantDetectionJobResponse {

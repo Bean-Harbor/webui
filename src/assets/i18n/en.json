@@ -4219,6 +4219,7 @@
   "Bottom": "Bottom",
   "Confirming package...": "Confirming package...",
   "Confirming package removal...": "Confirming package removal...",
+  "Package status cannot be determined.": "Package status cannot be determined.",
   "Delivery zone must have positive width and height.": "Delivery zone must have positive width and height.",
   "Save delivery zone": "Save delivery zone",
   "Unable to read package alert settings.": "Unable to read package alert settings.",

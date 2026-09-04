@@ -1860,6 +1860,21 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
+  it('shows an unknown package status when observations are not trustworthy', fakeAsync(() => {
+    api.getPackageEventConfig = jest.fn(() => of(packageEventConfigProjection({
+      enabled: true,
+      phase: 'unknown',
+      observability: 'occluded',
+    })));
+    spectator = createComponent();
+    const componentState = spectator.component as unknown as {
+      packageEventPhaseLabel: () => string;
+    };
+
+    expect(componentState.packageEventPhaseLabel()).toBe('Package status cannot be determined.');
+    discardPeriodicTasks();
+  }));
+
   it('shows the latest package removal delivery status after rearming', fakeAsync(() => {
     api.getPackageEventConfig = jest.fn(() => of(packageEventConfigProjection({
       enabled: true,
@@ -5013,8 +5028,10 @@ function packageEventConfigProjection(
     confirm_frames: 3,
     confirm_window_ms: 3_000,
     max_result_age_ms: 3_000,
+    max_observation_gap_ms: 2_000,
     revision: 1,
     phase: 'idle',
+    observability: 'unknown',
     event_id: null,
     delivered: false,
     last_error: null,
@@ -5024,6 +5041,8 @@ function packageEventConfigProjection(
     removed_frame_epoch_ms: null,
     removal_delivered: false,
     removal_last_error: null,
+    removal_recording_artifacts: [],
+    removal_recording_error: null,
     ...options,
   };
 }
