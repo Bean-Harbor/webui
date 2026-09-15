@@ -49,6 +49,15 @@ describe('Harbor Assistant content API service', () => {
     httpMock.verify();
   });
 
+  it('posts a bounded preview through the authenticated camera route', async () => {
+    const promise = firstValueFrom(spectator.service.personPreview('camera-one', '/9j/test', 42));
+    const request = httpMock.expectOne('/api/harbor-gate/api/beacon/cameras/camera-one/person-detection/preview');
+    expect(request.request.method).toBe('POST');
+    expect(request.request.body).toEqual({ image_base64: '/9j/test', frame_id: 42 });
+    expect(request.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
+    request.flush({ camera_id: 'camera-one', frame_id: 42, result: { frames: [{ detections: [] }] } });
+    await promise;
+  });
   it('loads prompt suggestions derived from the current knowledge index', async () => {
     const promise = firstValueFrom(spectator.service.suggestions());
 
@@ -542,11 +551,35 @@ describe('Harbor Assistant content API service', () => {
     );
 
     expect(request.request.method).toBe('PUT');
-    expect(request.request.body).toEqual({ enabled: true, zone: payload.zone });
+    expect(request.request.body).toEqual({
+      enabled: true,
+      zone: {
+        left: 0, top: 0, right: 1, bottom: 1,
+      },
+    });
     expect(request.request.headers.get('X-HarborOS-Auth-Token')).toBe('harbor-user-token');
     request.flush(response);
 
     await expect(promise).resolves.toEqual(response);
+  });
+
+  it('forwards explicit person association toggles while preserving legacy omission', async () => {
+    for (const enabled of [true, false, undefined]) {
+      const payload = {
+        enabled: true,
+        zone: {
+          left: 0, top: 0, right: 1, bottom: 1,
+        },
+        ...(enabled === undefined ? {} : { person_association_enabled: enabled }),
+      };
+      const promise = firstValueFrom(spectator.service.putPackageEventConfig('cam-rtsp-192-168-3-252', payload));
+      const request = httpMock.expectOne(
+        '/api/harbor-gate/api/beacon/cameras/cam-rtsp-192-168-3-252/package-detection/event-config',
+      );
+      expect(request.request.body).toEqual(payload);
+      request.flush(packageEventConfigProjection());
+      await promise;
+    }
   });
 
   it('gets typed cat detection control through the authenticated Gate path with an encoded camera ID', async () => {

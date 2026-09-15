@@ -100,7 +100,9 @@ describe('Harbor Assistant camera component', () => {
         request: { enabled: boolean; zone: { left: number; top: number; right: number; bottom: number } },
       ) => of(packageEventConfigProjection({
         enabled: request.enabled,
-        zone: request.zone,
+        zone: request.zone ?? {
+          left: 0, top: 0, right: 1, bottom: 1,
+        },
       }))),
       detectionJob: jest.fn(() => of(detectionJob())),
       createSnapshotTask: jest.fn(() => snapshotSubject$.asObservable()),
@@ -115,6 +117,101 @@ describe('Harbor Assistant camera component', () => {
     jest.restoreAllMocks();
   });
 
+  it('requests person frames only during live playback and discards another camera response', fakeAsync(() => {
+    spectator = createComponent();
+    const pending$ = new Subject<import('app/pages/harbor-assistant/shared/harbor-assistant.interface').PersonPreviewResponse>();
+    api.personPreview = jest.fn(() => pending$.asObservable());
+    const context = {
+      drawImage: jest.fn(),
+      clearRect: jest.fn(),
+      strokeRect: jest.fn(),
+      fillRect: jest.fn(),
+      fillText: jest.fn(),
+      measureText: jest.fn(() => ({ width: 50 })),
+    };
+    jest.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as unknown as CanvasRenderingContext2D);
+    jest.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/jpeg;base64,/9j/test');
+    const state = spectator.component as unknown as {
+      selectedCameraId: { set: (id: string) => void };
+      packageEventConfig: { set: (config: HarborAssistantPackageEventConfigProjection) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      liveVideo: { nativeElement: HTMLVideoElement };
+      personDetectionOverlay: { nativeElement: HTMLCanvasElement };
+      refreshPersonPreview: () => void;
+    };
+    const video = fakeLiveVideo({
+      videoWidth: 720, videoHeight: 576, paused: false, readyState: 4,
+    });
+    state.liveVideo = { nativeElement: video };
+    state.personDetectionOverlay = { nativeElement: document.createElement('canvas') };
+    state.selectedCameraId.set('cam-1');
+    state.packageEventConfig.set(packageEventConfigProjection({ person_association_enabled: true }));
+    state.hlsLiveStatus.set('stopped');
+    state.refreshPersonPreview();
+    expect(api.personPreview).not.toHaveBeenCalled();
+    state.hlsLiveStatus.set('live');
+    state.refreshPersonPreview();
+    state.refreshPersonPreview();
+    expect(api.personPreview).toHaveBeenCalledTimes(1);
+    state.selectedCameraId.set('cam-2');
+    pending$.next({
+      camera_id: 'cam-1',
+      frame_id: 1,
+      result: {
+        frames: [{
+          detections: [
+            {
+              label: 'person',
+              confidence: 0.9,
+              normalized_box: {
+                x1: 0, y1: 0, x2: 1, y2: 1,
+              },
+            },
+          ],
+        }],
+      },
+    });
+    expect(context.strokeRect).not.toHaveBeenCalled();
+    // Board measurements show cold single-frame inference takes about 1.9 seconds.
+    state.selectedCameraId.set('cam-1');
+    tick(1900);
+    pending$.next({
+      camera_id: 'cam-1',
+      frame_id: 1,
+      result: {
+        frames: [{
+          detections: [{
+            label: 'person',
+            confidence: 0.9,
+            normalized_box: {
+              x1: 0, y1: 0, x2: 1, y2: 1,
+            },
+          }],
+        }],
+      },
+    });
+    expect(context.strokeRect).toHaveBeenCalledTimes(1);
+    context.strokeRect.mockClear();
+    tick(1600);
+    pending$.next({
+      camera_id: 'cam-1',
+      frame_id: 1,
+      result: {
+        frames: [{
+          detections: [{
+            label: 'person',
+            confidence: 0.9,
+            normalized_box: {
+              x1: 0, y1: 0, x2: 1, y2: 1,
+            },
+          }],
+        }],
+      },
+    });
+    expect(context.strokeRect).not.toHaveBeenCalled();
+    pending$.complete();
+    discardPeriodicTasks();
+  }));
   it('uses snapshot polling instead of long-running MJPEG for stream-only cameras', fakeAsync(() => {
     api.cameraState = jest.fn(() => of(cameraState({
       snapshotUrl: null,
@@ -1916,11 +2013,8 @@ describe('Harbor Assistant camera component', () => {
       })));
     spectator = createComponent();
     const editedZone = {
+      personAssociationEnabled: false,
       enabled: true,
-      left: 0.2,
-      top: 0.25,
-      right: 0.8,
-      bottom: 0.9,
     };
     const componentState = spectator.component as unknown as {
       packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
@@ -1962,11 +2056,8 @@ describe('Harbor Assistant camera component', () => {
     api.putPackageEventConfig = jest.fn(() => save$.asObservable());
     spectator = createComponent();
     const savedZone = {
+      personAssociationEnabled: false,
       enabled: true,
-      left: 0.2,
-      top: 0.25,
-      right: 0.8,
-      bottom: 0.9,
     };
     const componentState = spectator.component as unknown as {
       packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
@@ -1993,10 +2084,10 @@ describe('Harbor Assistant camera component', () => {
     save$.next(packageEventConfigProjection({
       enabled: true,
       zone: {
-        left: savedZone.left,
-        top: savedZone.top,
-        right: savedZone.right,
-        bottom: savedZone.bottom,
+        left: 0,
+        top: 0,
+        right: 1,
+        bottom: 1,
       },
       revision: 2,
       phase: 'present',
@@ -2007,10 +2098,10 @@ describe('Harbor Assistant camera component', () => {
     expect(componentState.packageEventConfigBusy()).toBe(false);
     expect(componentState.packageEventConfig()?.revision).toBe(2);
     expect(componentState.packageEventConfig()?.zone).toEqual({
-      left: savedZone.left,
-      top: savedZone.top,
-      right: savedZone.right,
-      bottom: savedZone.bottom,
+      left: 0,
+      top: 0,
+      right: 1,
+      bottom: 1,
     });
     expect(componentState.packageEventConfig()?.delivered).toBe(false);
     expect(componentState.packageEventForm.getRawValue()).toEqual(savedZone);
@@ -2033,16 +2124,15 @@ describe('Harbor Assistant camera component', () => {
     const componentState = spectator.component as unknown as {
       packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
       packageEventForm: {
-        setValue: (value: { enabled: boolean; left: number; top: number; right: number; bottom: number }) => void;
+        setValue: (value: {
+          personAssociationEnabled: boolean; enabled: boolean;
+        }) => void;
       };
       savePackageEventConfig: () => void;
     };
     componentState.packageEventForm.setValue({
+      personAssociationEnabled: false,
       enabled: false,
-      left: 0,
-      top: 0,
-      right: 1,
-      bottom: 1,
     });
 
     componentState.savePackageEventConfig();
@@ -2199,34 +2289,64 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it('saves one normalized package delivery zone', fakeAsync(() => {
+  it('saves package switches without configurable delivery zone fields', fakeAsync(() => {
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
       packageEventForm: {
-        setValue: (value: { enabled: boolean; left: number; top: number; right: number; bottom: number }) => void;
+        setValue: (value: {
+          personAssociationEnabled: boolean; enabled: boolean;
+        }) => void;
       };
       savePackageEventConfig: () => void;
     };
     componentState.packageEventForm.setValue({
+      personAssociationEnabled: false,
       enabled: true,
-      left: 0.2,
-      top: 0.25,
-      right: 0.8,
-      bottom: 0.9,
     });
 
     componentState.savePackageEventConfig();
     flushMicrotasks();
 
     expect(api.putPackageEventConfig).toHaveBeenCalledWith('cam-1', {
+      person_association_enabled: false,
       enabled: true,
-      zone: {
-        left: 0.2,
-        top: 0.25,
-        right: 0.8,
-        bottom: 0.9,
-      },
     });
+    expect(spectator.query('.package-zone-fields')).not.toExist();
+    discardPeriodicTasks();
+  }));
+
+  it('only enables person association for a ready camera and preserves a failed edit', fakeAsync(() => {
+    spectator = createComponent();
+    const state = spectator.component as unknown as {
+      selectedCameraId: { set: (id: string) => void };
+      applyPackageEventConfig: (projection: HarborAssistantPackageEventConfigProjection) => void;
+      savePackageEventConfig: () => void;
+    };
+    state.selectedCameraId.set('cam-rtsp-192-168-3-252');
+    state.applyPackageEventConfig(packageEventConfigProjection({
+      camera_id: 'cam-rtsp-192-168-3-252', enabled: true, person_association_ready: false,
+    }));
+    spectator.detectChanges();
+    let checkbox = spectator.query<HTMLInputElement>('input[aria-label="Person association analysis"]')!;
+    expect(checkbox.disabled).toBe(true);
+    state.applyPackageEventConfig(packageEventConfigProjection({
+      camera_id: 'cam-rtsp-192-168-3-252', enabled: true, person_association_ready: true,
+    }));
+    spectator.detectChanges();
+    checkbox = spectator.query<HTMLInputElement>('input[aria-label="Person association analysis"]')!;
+    expect(checkbox.disabled).toBe(false);
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    api.putPackageEventConfig = jest.fn(() => throwError(() => new Error('unavailable')));
+    state.savePackageEventConfig();
+    spectator.detectChanges();
+    expect(api.putPackageEventConfig).toHaveBeenCalledWith('cam-rtsp-192-168-3-252', expect.objectContaining({
+      person_association_enabled: true,
+    }));
+    expect(checkbox.checked).toBe(true);
+    state.selectedCameraId.set('cam-1');
+    spectator.detectChanges();
+    expect(checkbox.disabled).toBe(true);
     discardPeriodicTasks();
   }));
 

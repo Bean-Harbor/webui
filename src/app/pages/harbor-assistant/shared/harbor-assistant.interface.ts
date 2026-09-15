@@ -329,11 +329,25 @@ export interface HarborAssistantPackageDeliveryZone {
 }
 
 export interface HarborAssistantPackageEventConfigRequest {
+  person_association_enabled?: boolean;
   enabled: boolean;
-  zone: HarborAssistantPackageDeliveryZone;
+  zone?: HarborAssistantPackageDeliveryZone;
 }
 
 export type HarborAssistantPackagePresencePhase = 'idle' | 'candidate' | 'present' | 'removing' | 'unknown';
+export type PersonAssociationStatus = 'correlated' | 'not_observed' | 'ambiguous' | 'unavailable';
+
+export interface PersonDetectionBox {
+  label: 'person';
+  confidence: number;
+  normalized_box: { x1: number; y1: number; x2: number; y2: number };
+}
+
+export interface PersonPreviewResponse {
+  camera_id: string;
+  frame_id: number;
+  result: { frames: { detections: PersonDetectionBox[] }[] };
+}
 export type HarborAssistantPackageObservability = 'unknown' | 'healthy' | 'offline' | 'occluded' | 'discontinuous';
 
 export interface HarborAssistantPackageRecordingArtifact {
@@ -344,6 +358,11 @@ export interface HarborAssistantPackageRecordingArtifact {
 }
 
 export interface HarborAssistantPackageEventConfigProjection {
+  person_association_enabled?: boolean;
+  person_association_ready?: boolean;
+  person_association_readiness_reason?: string;
+  association_event_id?: string | null;
+  person_association_status?: PersonAssociationStatus | null;
   camera_id: string;
   explicit: boolean;
   enabled: boolean;

@@ -11,6 +11,7 @@ import {
 import { harborAssistantPreviewUrl } from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  PersonPreviewResponse,
   HarborAssistantCatDetectionControlProjection,
   HarborAssistantCatDetectionControlRequest,
   HarborAssistantCatDetectionObservation,
@@ -298,17 +299,28 @@ export class HarborAssistantContentApiService {
     ));
   }
 
+  personPreview(cameraId: string, imageBase64: string, frameId: number): Observable<PersonPreviewResponse> {
+    return this.withUserToken((options) => this.http.post<PersonPreviewResponse>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/person-detection/preview`),
+      { image_base64: imageBase64, frame_id: frameId },
+      options,
+    ));
+  }
+
   putPackageEventConfig(
     cameraId: string,
     request: HarborAssistantPackageEventConfigRequest,
   ): Observable<HarborAssistantPackageEventConfigProjection> {
     const payload: HarborAssistantPackageEventConfigRequest = {
       enabled: request.enabled,
+      ...(request.person_association_enabled === undefined
+        ? {}
+        : { person_association_enabled: request.person_association_enabled }),
       zone: {
-        left: request.zone.left,
-        top: request.zone.top,
-        right: request.zone.right,
-        bottom: request.zone.bottom,
+        left: 0,
+        top: 0,
+        right: 1,
+        bottom: 1,
       },
     };
     return this.withUserToken((options) => this.http.put<HarborAssistantPackageEventConfigProjection>(

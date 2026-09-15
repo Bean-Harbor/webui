@@ -147,30 +147,27 @@
                 <mat-slide-toggle formControlName="enabled">
                   {{ 'Package alerts' | translate }}
                 </mat-slide-toggle>
-                <div class="package-zone-fields">
-                  <label>
-                    <span>{{ 'Left' | translate }}</span>
-                    <input type="number" min="0" max="1" step="0.05" formControlName="left">
-                  </label>
-                  <label>
-                    <span>{{ 'Top' | translate }}</span>
-                    <input type="number" min="0" max="1" step="0.05" formControlName="top">
-                  </label>
-                  <label>
-                    <span>{{ 'Right' | translate }}</span>
-                    <input type="number" min="0" max="1" step="0.05" formControlName="right">
-                  </label>
-                  <label>
-                    <span>{{ 'Bottom' | translate }}</span>
-                    <input type="number" min="0" max="1" step="0.05" formControlName="bottom">
-                  </label>
-                </div>
+                <label>
+                  <input
+                    #personAssociationCheckbox
+                    type="checkbox"
+                    [attr.aria-label]="'Person association analysis' | translate"
+                    [checked]="packageEventForm.controls.personAssociationEnabled.value"
+                    [disabled]="packageEventConfigBusy() || selectedCameraId() !== 'cam-rtsp-192-168-3-252'
+                      || !packageEventForm.controls.enabled.value
+                      || (!packageEventConfig()?.person_association_ready
+                        && !packageEventForm.controls.personAssociationEnabled.value)"
+                    (change)="packageEventForm.controls.personAssociationEnabled.setValue(personAssociationCheckbox.checked)"
+                  >
+                  {{ 'Person association analysis' | translate }}
+                  <span class="pill">{{ 'Experimental' | translate }}</span>
+                </label>
                 <button
                   mat-stroked-button
                   type="submit"
                   [disabled]="packageEventConfigBusy() || packageEventForm.invalid"
                 >
-                  {{ 'Save delivery zone' | translate }}
+                  {{ 'Save' | translate }}
                 </button>
                 <span class="package-event-status">{{ packageEventPhaseLabel() }}</span>
               </form>
@@ -217,6 +214,7 @@
                       class="cat-detection-overlay"
                       aria-hidden="true"
                     ></canvas>
+                    <canvas #personDetectionOverlay class="cat-detection-overlay" aria-hidden="true"></canvas>
                     <ix-harbor-assistant-live-controls
                       [currentTime]="liveControlCurrentTime()"
                       [endTime]="liveControlEndTime()"

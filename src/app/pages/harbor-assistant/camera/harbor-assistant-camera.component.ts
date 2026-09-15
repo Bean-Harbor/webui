@@ -49,6 +49,7 @@ import {
   HarborAssistantSearchSourceScope,
   HarborAssistantSearchWaterfallItem,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
+import { drawPersonBoxes } from 'app/pages/harbor-assistant/shared/person-detection-overlay';
 import {
   HarborAssistantLiveControlsComponent,
   HarborAssistantLivePlaybackMode,
@@ -124,6 +125,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   @ViewChild('liveImage') private liveImage?: ElementRef<HTMLImageElement>;
   @ViewChild('liveTransitionFrame') private liveTransitionFrame?: ElementRef<HTMLCanvasElement>;
   @ViewChild('catDetectionOverlay') private catDetectionOverlay?: ElementRef<HTMLCanvasElement>;
+  @ViewChild('personDetectionOverlay') private personDetectionOverlay?: ElementRef<HTMLCanvasElement>;
+  private personPreviewPending = false;
+  private personPreviewFrameId = 0;
+  private personPreviewDisplayedAt = 0;
+  private readonly personPreviewMaxAgeMs = 3000;
   @ViewChild('liveVideo') private liveVideo?: ElementRef<HTMLVideoElement>;
   @ViewChild('playbackVideo') private playbackVideo?: ElementRef<HTMLVideoElement>;
   @ViewChild('mediaViewer') private mediaViewer?: ElementRef<HTMLElement>;
@@ -138,11 +144,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   });
 
   protected readonly packageEventForm = this.formBuilder.group({
+    personAssociationEnabled: [false],
     enabled: [false],
-    left: [0, [Validators.required, Validators.min(0), Validators.max(1)]],
-    top: [0, [Validators.required, Validators.min(0), Validators.max(1)]],
-    right: [1, [Validators.required, Validators.min(0), Validators.max(1)]],
-    bottom: [1, [Validators.required, Validators.min(0), Validators.max(1)]],
   });
 
   protected readonly fixtureCameraId = 'public-fixture-dvr';
@@ -392,6 +395,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly liveStopTimeoutMs = 5_000;
 
   ngOnInit(): void {
+    timer(0, 1000).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.refreshPersonPreview());
     this.refreshCameraDvr();
     fromEvent(this.window, 'pagehide').pipe(
       takeUntilDestroyed(this.destroyRef),
@@ -1184,22 +1188,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     const value = this.packageEventForm.getRawValue();
-    if (value.left >= value.right || value.top >= value.bottom) {
-      this.packageEventConfigError.set(this.translate.instant('Delivery zone must have positive width and height.'));
-      return;
-    }
     const token = ++this.packageEventConfigToken;
     this.packageEventStatusRefreshToken += 1;
     this.packageEventConfigBusy.set(true);
     this.packageEventConfigError.set(null);
     this.api.putPackageEventConfig(deviceId, {
+      person_association_enabled: value.enabled && value.personAssociationEnabled,
       enabled: value.enabled,
-      zone: {
-        left: value.left,
-        top: value.top,
-        right: value.right,
-        bottom: value.bottom,
-      },
     }).pipe(
       finalize(() => {
         if (token === this.packageEventConfigToken) {
@@ -1250,11 +1245,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     if (!deviceId) {
       this.packageEventConfig.set(null);
       this.packageEventForm.reset({
+        personAssociationEnabled: false,
         enabled: false,
-        left: 0,
-        top: 0,
-        right: 1,
-        bottom: 1,
       });
       return;
     }
@@ -1282,11 +1274,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.packageEventConfigLoaded.set(true);
     this.packageEventConfigError.set(projection.last_error);
     this.packageEventForm.setValue({
+      personAssociationEnabled: projection.person_association_enabled ?? false,
       enabled: projection.enabled,
-      left: projection.zone.left,
-      top: projection.zone.top,
-      right: projection.zone.right,
-      bottom: projection.zone.bottom,
     });
   }
 
@@ -1705,6 +1694,50 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return this.window.performance.now();
     }
     return Date.now();
+  }
+
+  private refreshPersonPreview(): void {
+    const video = this.liveVideo?.nativeElement;
+    const canvas = this.personDetectionOverlay?.nativeElement;
+    const camera = this.selectedCameraId();
+    const context = canvas?.getContext('2d');
+    const active = !!camera && !!video && !!canvas && !video.paused && video.readyState >= 2
+      && this.hlsLiveStatus() === 'live' && !document.hidden && this.packageEventConfig()?.person_association_enabled;
+    if (!active || this.monotonicNow() - this.personPreviewDisplayedAt > this.personPreviewMaxAgeMs) {
+      if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    if (!active || this.personPreviewPending) return;
+    const captured = this.monotonicNow();
+    const frameId = ++this.personPreviewFrameId;
+    const capture = document.createElement('canvas');
+    const scale = Math.min(1, 720 / Math.max(video.videoWidth, video.videoHeight));
+    capture.width = Math.round(video.videoWidth * scale);
+    capture.height = Math.round(video.videoHeight * scale);
+    const captureContext = capture.getContext('2d');
+    if (!captureContext || !capture.width || !capture.height) return;
+    let encoded: string;
+    try {
+      captureContext.drawImage(video, 0, 0, capture.width, capture.height);
+      encoded = capture.toDataURL('image/jpeg', 0.75).split(',')[1];
+    } catch {
+      return;
+    }
+    this.personPreviewPending = true;
+    this.api.personPreview(camera, encoded, frameId).pipe(
+      finalize(() => { this.personPreviewPending = false; }),
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (response) => {
+        if (camera !== this.selectedCameraId() || response.camera_id !== camera || response.frame_id !== frameId
+          || this.monotonicNow() - captured > this.personPreviewMaxAgeMs || video.paused || document.hidden
+          || !this.packageEventConfig()?.person_association_enabled || this.hlsLiveStatus() !== 'live') return;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        drawPersonBoxes(canvas, response.result.frames[0]?.detections ?? [], this.translate.instant('Person'));
+        this.personPreviewDisplayedAt = captured;
+      },
+      error: () => { if (context) context.clearRect(0, 0, canvas.width, canvas.height); },
+    });
   }
 
   private drawCatDetectionOverlay(result: HarborAssistantDetectionResult | null | undefined): void {
