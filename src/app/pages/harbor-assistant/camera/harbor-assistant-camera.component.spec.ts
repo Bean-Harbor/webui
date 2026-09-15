@@ -117,6 +117,114 @@ describe('Harbor Assistant camera component', () => {
     jest.restoreAllMocks();
   });
 
+  it.each([
+    ['SpaceMITExecutionProvider', 20, 0, 'NPU · 20 ms · 0 packages'],
+    ['spacemit', 24, 1, 'NPU · 24 ms · 1 package'],
+    ['CPUExecutionProvider', 35, 2, 'CPU · 35 ms · 2 packages'],
+  ])('shows actual package inference metrics for %s', (provider, inferenceMs, count, expected) => {
+    spectator = createComponent();
+    const state = spectator.component as unknown as {
+      packageDetectionEffectiveStatus: { set: (status: string) => void };
+      packageDetectionJob: { set: (job: HarborAssistantDetectionJobResponse) => void };
+    };
+    state.packageDetectionEffectiveStatus.set('running');
+    const job = detectionJob();
+    state.packageDetectionJob.set({
+      ...job,
+      latest_result: {
+        ...job.latest_result!,
+        target_label: 'package',
+        provider,
+        inference_ms: inferenceMs,
+        detection_count: count,
+      },
+    });
+    spectator.detectChanges();
+    expect(spectator.query('[data-testid="package-detection-status"]')).toHaveText(expected);
+    state.packageDetectionEffectiveStatus.set('stopped');
+    expect(spectator.component.packageDetectionStatusLabel()).toBe('Package detection stopped.');
+  });
+
+  it('saves package alerts from the toggle and removes the extra person and save controls', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true, effective_status: 'running',
+    })));
+    spectator = createComponent();
+    spectator.click('.package-event-config mat-slide-toggle button');
+    expect(api.putPackageEventConfig).toHaveBeenCalledWith('cam-1', { enabled: true });
+    expect(spectator.query('input[aria-label="Person association analysis"]')).not.toExist();
+    expect(spectator.query('.package-event-config button[type="submit"]')).not.toExist();
+    discardPeriodicTasks();
+  }));
+
+  it('restores confirmed package alerts after a failed immediate save', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true, effective_status: 'running',
+    })));
+    api.putPackageEventConfig = jest.fn(() => throwError(() => new Error('unavailable')));
+    spectator = createComponent();
+    spectator.click('.package-event-config mat-slide-toggle button');
+    expect(spectator.query('.package-event-config button')).toHaveAttribute('aria-checked', 'false');
+    expect(spectator.query('.package-detection-error')).toHaveText('Unable to update package alerts.');
+    discardPeriodicTasks();
+  }));
+
+  it('disables package alerts while detection is stopped and keeps the saved preference', fakeAsync(() => {
+    api.getPackageEventConfig = jest.fn(() => of(packageEventConfigProjection({ enabled: true })));
+    spectator = createComponent();
+    const alerts = spectator.query<HTMLButtonElement>('.package-event-config mat-slide-toggle button')!;
+    expect(alerts.disabled).toBe(true);
+    expect(alerts).toHaveAttribute('aria-checked', 'true');
+    discardPeriodicTasks();
+  }));
+
+  it('keeps the completed alert write when returning to its camera before another camera read finishes', fakeAsync(() => {
+    const save$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    const otherRead$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    const staleRead$ = new Subject<HarborAssistantPackageEventConfigProjection>();
+    spectator = createComponent();
+    api.putPackageEventConfig = jest.fn(() => save$);
+    api.getPackageEventConfig = jest.fn()
+      .mockReturnValueOnce(otherRead$)
+      .mockReturnValueOnce(staleRead$);
+    const state = spectator.component as unknown as {
+      selectedCameraId: { set: (id: string) => void };
+      packageEventForm: { setValue: (value: { enabled: boolean }) => void };
+      savePackageEventConfig: () => void;
+      loadPackageEventConfig: (camera: string) => void;
+      packageEventConfig: () => HarborAssistantPackageEventConfigProjection;
+      packageEventConfigLoaded: () => boolean;
+      packageEventConfigBusy: () => boolean;
+    };
+    state.packageEventForm.setValue({ enabled: true });
+    state.savePackageEventConfig();
+    state.selectedCameraId.set('cam-2');
+    state.loadPackageEventConfig('cam-2');
+    state.selectedCameraId.set('cam-1');
+    state.loadPackageEventConfig('cam-1');
+    save$.next(packageEventConfigProjection({ enabled: true }));
+    save$.complete();
+    otherRead$.next(packageEventConfigProjection({ camera_id: 'cam-2', enabled: false }));
+    staleRead$.next(packageEventConfigProjection({ enabled: false }));
+    expect(state.packageEventConfigLoaded()).toBe(true);
+    expect(state.packageEventConfigBusy()).toBe(false);
+    expect(state.packageEventConfig().camera_id).toBe('cam-1');
+    expect(state.packageEventConfig().enabled).toBe(true);
+    discardPeriodicTasks();
+  }));
+
+  it('keeps muted historical package events out of pending alert status after alerts are enabled', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true, effective_status: 'running',
+    })));
+    api.getPackageEventConfig = jest.fn(() => of(packageEventConfigProjection({
+      enabled: true, phase: 'present', notification_suppressed: true,
+    })));
+    spectator = createComponent();
+    expect(spectator.query('.package-event-status')).toHaveText('Package detected. No alert will be sent.');
+    discardPeriodicTasks();
+  }));
+
   it('requests person frames only during live playback and discards another camera response', fakeAsync(() => {
     spectator = createComponent();
     const pending$ = new Subject<import('app/pages/harbor-assistant/shared/harbor-assistant.interface').PersonPreviewResponse>();
@@ -1944,6 +2052,9 @@ describe('Harbor Assistant camera component', () => {
   }));
 
   it('shows package removal confirmation while absence is still being verified', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true, effective_status: 'running',
+    })));
     api.getPackageEventConfig = jest.fn(() => of(packageEventConfigProjection({
       enabled: true,
       phase: 'removing',
@@ -1958,6 +2069,9 @@ describe('Harbor Assistant camera component', () => {
   }));
 
   it('shows an unknown package status when observations are not trustworthy', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true, effective_status: 'running',
+    })));
     api.getPackageEventConfig = jest.fn(() => of(packageEventConfigProjection({
       enabled: true,
       phase: 'unknown',
@@ -1973,6 +2087,9 @@ describe('Harbor Assistant camera component', () => {
   }));
 
   it('shows the latest package removal delivery status after rearming', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true, effective_status: 'running',
+    })));
     api.getPackageEventConfig = jest.fn(() => of(packageEventConfigProjection({
       enabled: true,
       phase: 'idle',
@@ -1996,7 +2113,7 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it('keeps unsaved delivery-zone edits while package alert status refreshes without overlap', fakeAsync(() => {
+  it('keeps alert preferences while package status refreshes without overlap', fakeAsync(() => {
     const statusRefresh$ = new Subject<HarborAssistantPackageEventConfigProjection>();
     api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
       desired_enabled: true,
@@ -2013,7 +2130,6 @@ describe('Harbor Assistant camera component', () => {
       })));
     spectator = createComponent();
     const editedZone = {
-      personAssociationEnabled: false,
       enabled: true,
     };
     const componentState = spectator.component as unknown as {
@@ -2056,7 +2172,6 @@ describe('Harbor Assistant camera component', () => {
     api.putPackageEventConfig = jest.fn(() => save$.asObservable());
     spectator = createComponent();
     const savedZone = {
-      personAssociationEnabled: false,
       enabled: true,
     };
     const componentState = spectator.component as unknown as {
@@ -2118,20 +2233,20 @@ describe('Harbor Assistant camera component', () => {
     })));
     api.getPackageEventConfig = jest.fn()
       .mockReturnValueOnce(of(packageEventConfigProjection({ enabled: true })))
-      .mockReturnValueOnce(statusRefresh$.asObservable());
+      .mockReturnValueOnce(statusRefresh$.asObservable())
+      .mockReturnValue(of(packageEventConfigProjection({ enabled: false })));
     api.putPackageEventConfig = jest.fn(() => save$.asObservable());
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
       packageEventConfig: () => HarborAssistantPackageEventConfigProjection | null;
       packageEventForm: {
         setValue: (value: {
-          personAssociationEnabled: boolean; enabled: boolean;
+          enabled: boolean;
         }) => void;
       };
       savePackageEventConfig: () => void;
     };
     componentState.packageEventForm.setValue({
-      personAssociationEnabled: false,
       enabled: false,
     });
 
@@ -2294,13 +2409,12 @@ describe('Harbor Assistant camera component', () => {
     const componentState = spectator.component as unknown as {
       packageEventForm: {
         setValue: (value: {
-          personAssociationEnabled: boolean; enabled: boolean;
+          enabled: boolean;
         }) => void;
       };
       savePackageEventConfig: () => void;
     };
     componentState.packageEventForm.setValue({
-      personAssociationEnabled: false,
       enabled: true,
     });
 
@@ -2308,45 +2422,9 @@ describe('Harbor Assistant camera component', () => {
     flushMicrotasks();
 
     expect(api.putPackageEventConfig).toHaveBeenCalledWith('cam-1', {
-      person_association_enabled: false,
       enabled: true,
     });
     expect(spectator.query('.package-zone-fields')).not.toExist();
-    discardPeriodicTasks();
-  }));
-
-  it('only enables person association for a ready camera and preserves a failed edit', fakeAsync(() => {
-    spectator = createComponent();
-    const state = spectator.component as unknown as {
-      selectedCameraId: { set: (id: string) => void };
-      applyPackageEventConfig: (projection: HarborAssistantPackageEventConfigProjection) => void;
-      savePackageEventConfig: () => void;
-    };
-    state.selectedCameraId.set('cam-rtsp-192-168-3-252');
-    state.applyPackageEventConfig(packageEventConfigProjection({
-      camera_id: 'cam-rtsp-192-168-3-252', enabled: true, person_association_ready: false,
-    }));
-    spectator.detectChanges();
-    let checkbox = spectator.query<HTMLInputElement>('input[aria-label="Person association analysis"]')!;
-    expect(checkbox.disabled).toBe(true);
-    state.applyPackageEventConfig(packageEventConfigProjection({
-      camera_id: 'cam-rtsp-192-168-3-252', enabled: true, person_association_ready: true,
-    }));
-    spectator.detectChanges();
-    checkbox = spectator.query<HTMLInputElement>('input[aria-label="Person association analysis"]')!;
-    expect(checkbox.disabled).toBe(false);
-    checkbox.checked = true;
-    checkbox.dispatchEvent(new Event('change'));
-    api.putPackageEventConfig = jest.fn(() => throwError(() => new Error('unavailable')));
-    state.savePackageEventConfig();
-    spectator.detectChanges();
-    expect(api.putPackageEventConfig).toHaveBeenCalledWith('cam-rtsp-192-168-3-252', expect.objectContaining({
-      person_association_enabled: true,
-    }));
-    expect(checkbox.checked).toBe(true);
-    state.selectedCameraId.set('cam-1');
-    spectator.detectChanges();
-    expect(checkbox.disabled).toBe(true);
     discardPeriodicTasks();
   }));
 

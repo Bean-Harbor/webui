@@ -1,5 +1,5 @@
 import { NgClass } from '@angular/common';
-import { ChangeDetectionStrategy, Component, DestroyRef, ElementRef, OnDestroy, OnInit, ViewChild, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, ElementRef, OnDestroy, OnInit, ViewChild, computed, effect, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { NonNullableFormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButton } from '@angular/material/button';
@@ -144,7 +144,6 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   });
 
   protected readonly packageEventForm = this.formBuilder.group({
-    personAssociationEnabled: [false],
     enabled: [false],
   });
 
@@ -393,6 +392,21 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly catDetectionPollIntervalMs = 250;
   private readonly catDetectionResultMaxAgeMs = 1_500;
   private readonly liveStopTimeoutMs = 5_000;
+
+  constructor() {
+    effect(() => {
+      const disabled = !this.packageEventConfigLoaded()
+        || !this.packageDetectionDesiredEnabled()
+        || this.packageDetectionControlDisabled()
+        || this.packageEventConfigBusy();
+      const control = this.packageEventForm.controls.enabled;
+      if (disabled) {
+        control.disable({ emitEvent: false });
+      } else {
+        control.enable({ emitEvent: false });
+      }
+    });
+  }
 
   ngOnInit(): void {
     timer(0, 1000).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.refreshPersonPreview());
@@ -1103,7 +1117,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       case 'starting':
         return this.translate.instant('Starting package detection...');
       case 'running':
-        return this.translate.instant('Package detection running.');
+        return this.packageDetectionMetricsLabel();
       case 'stopping':
         return this.translate.instant('Stopping package detection...');
       case 'failed':
@@ -1113,6 +1127,25 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       default:
         return '';
     }
+  }
+
+  private packageDetectionMetricsLabel(): string {
+    const job = this.packageDetectionJob();
+    const result = job?.latest_result;
+    if (!result) {
+      return this.translate.instant('Package detection running.');
+    }
+    const provider = result.provider ?? job?.metrics?.provider ?? '';
+    let device: 'CPU' | 'NPU' | null = null;
+    if (provider.includes('SpaceMIT') || provider === 'spacemit') {
+      device = 'NPU';
+    } else if (provider === 'CPUExecutionProvider') {
+      device = 'CPU';
+    }
+    const packages = this.translate.instant('{count, plural, one {# package} other {# packages}}', {
+      count: result.detection_count,
+    });
+    return `${device ?? this.translate.instant('Provider unknown')} · ${result.inference_ms} ms · ${packages}`;
   }
 
   setPackageDetectionEnabled(enabled: boolean): void {
@@ -1188,28 +1221,31 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     const value = this.packageEventForm.getRawValue();
-    const token = ++this.packageEventConfigToken;
+    const confirmedProjection = this.packageEventConfig();
+    this.packageEventConfigToken += 1;
     this.packageEventStatusRefreshToken += 1;
     this.packageEventConfigBusy.set(true);
     this.packageEventConfigError.set(null);
     this.api.putPackageEventConfig(deviceId, {
-      person_association_enabled: value.enabled && value.personAssociationEnabled,
       enabled: value.enabled,
     }).pipe(
       finalize(() => {
-        if (token === this.packageEventConfigToken) {
-          this.packageEventConfigBusy.set(false);
-        }
+        this.packageEventConfigBusy.set(false);
       }),
       takeUntilDestroyed(this.destroyRef),
     ).subscribe({
       next: (projection) => {
-        if (token === this.packageEventConfigToken && deviceId === this.selectedCameraId()) {
+        if (!this.destroyed && deviceId === this.selectedCameraId()) {
+          this.packageEventConfigToken += 1;
           this.applyPackageEventConfig(projection);
         }
       },
       error: () => {
-        if (token === this.packageEventConfigToken && deviceId === this.selectedCameraId()) {
+        if (!this.destroyed && deviceId === this.selectedCameraId()) {
+          this.packageEventConfigToken += 1;
+          if (confirmedProjection) {
+            this.applyPackageEventConfig(confirmedProjection);
+          }
           this.packageEventConfigError.set(this.translate.instant('Unable to update package alerts.'));
         }
       },
@@ -1217,10 +1253,19 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   protected packageEventPhaseLabel(): string {
+    if (!this.packageDetectionDesiredEnabled()) {
+      return this.translate.instant('Package detection stopped.');
+    }
+    if (!this.packageEventConfig()?.enabled) {
+      return this.translate.instant('Package alerts are off. Events are still recorded.');
+    }
     switch (this.packageEventConfig()?.phase) {
       case 'candidate':
         return this.translate.instant('Confirming package...');
       case 'present':
+        if (this.packageEventConfig()?.notification_suppressed) {
+          return this.translate.instant('Package detected. No alert will be sent.');
+        }
         return this.packageEventConfig()?.delivered
           ? this.translate.instant('Package alert delivered.')
           : this.translate.instant('Package alert pending.');
@@ -1230,6 +1275,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         return this.translate.instant('Package status cannot be determined.');
       default:
         if (this.packageEventConfig()?.removal_event_id) {
+          if (this.packageEventConfig()?.removal_notification_suppressed) {
+            return this.translate.instant('Package removal detected. No alert will be sent.');
+          }
           return this.packageEventConfig()?.removal_delivered
             ? this.translate.instant('Package removal alert delivered.')
             : this.translate.instant('Package removal alert pending.');
@@ -1239,13 +1287,16 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   private loadPackageEventConfig(deviceId: string | null): void {
+    if (this.packageEventConfigBusy() && this.packageEventConfigLoaded()
+      && deviceId === this.packageEventConfig()?.camera_id) {
+      return;
+    }
     const token = ++this.packageEventConfigToken;
     this.packageEventConfigLoaded.set(false);
     this.packageEventConfigError.set(null);
     if (!deviceId) {
       this.packageEventConfig.set(null);
       this.packageEventForm.reset({
-        personAssociationEnabled: false,
         enabled: false,
       });
       return;
@@ -1274,7 +1325,6 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.packageEventConfigLoaded.set(true);
     this.packageEventConfigError.set(projection.last_error);
     this.packageEventForm.setValue({
-      personAssociationEnabled: projection.person_association_enabled ?? false,
       enabled: projection.enabled,
     });
   }
@@ -1282,7 +1332,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private refreshPackageEventStatus(deviceId: string, observationToken: number): void {
     if (
       !this.packageDetectionObservationIsCurrent(deviceId, observationToken)
-      || !this.packageEventConfig()?.enabled
+      || !this.packageDetectionDesiredEnabled()
       || this.packageEventConfigBusy()
       || this.packageEventStatusRefreshPendingCameraIds.has(deviceId)
     ) {
@@ -1307,6 +1357,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
           phase: projection.phase,
           observability: projection.observability,
           delivered: projection.delivered,
+          notification_suppressed: projection.notification_suppressed,
+          removal_notification_suppressed: projection.removal_notification_suppressed,
           last_error: projection.last_error,
           removal_event_id: projection.removal_event_id,
           removal_instance_id: projection.removal_instance_id,
@@ -1331,7 +1383,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     return this.packageDetectionObservationIsCurrent(deviceId, observationToken)
       && statusRefreshToken === this.packageEventStatusRefreshToken
       && !this.packageEventConfigBusy()
-      && this.packageEventConfig()?.enabled === true;
+      && this.packageDetectionDesiredEnabled() === true;
   }
 
   private deferPackageDetectionControlLoadForPendingWrite(deviceId: string | null): boolean {
@@ -1365,6 +1417,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     if (projection) {
       this.applyPackageDetectionControlProjection(projection);
+      this.loadPackageEventConfig(deviceId);
     } else {
       if (confirmedProjection) {
         this.restoreConfirmedPackageDetectionControl(confirmedProjection);

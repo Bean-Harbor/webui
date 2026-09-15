@@ -22,9 +22,7 @@ export function personBoxesAtTime(evidence: unknown, seconds: number): PersonDet
   ) === closestDistance);
   if (!closestEntry) return [];
   const closestTimestamp = closestEntry.media_offset_ms as number;
-  return timestampedEntries.filter((entry) =>
-    (entry.media_offset_ms as number) === closestTimestamp
-  ).map((entry) => ({
+  return timestampedEntries.filter((entry) => (entry.media_offset_ms as number) === closestTimestamp).map((entry) => ({
     label: 'person' as const,
     confidence: entry.confidence as number,
     normalized_box: entry.normalized_box as PersonDetectionBox['normalized_box'],

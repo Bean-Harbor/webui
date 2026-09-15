@@ -358,6 +358,8 @@ export interface HarborAssistantPackageRecordingArtifact {
 }
 
 export interface HarborAssistantPackageEventConfigProjection {
+  notification_suppressed?: boolean;
+  removal_notification_suppressed?: boolean;
   person_association_enabled?: boolean;
   person_association_ready?: boolean;
   person_association_readiness_reason?: string;
