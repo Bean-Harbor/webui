@@ -145,6 +145,30 @@ describe('Harbor Assistant camera component', () => {
     expect(spectator.component.packageDetectionStatusLabel()).toBe('Package detection stopped.');
   });
 
+  it('updates package status when the running observation replaces starting control', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true, effective_status: 'starting',
+    })));
+    api.packageDetectionObservationForCamera = jest.fn(() => of(detectionJob({
+      status: 'running', target_labels: ['package'],
+    })));
+    spectator = createComponent();
+    expect(spectator.component.packageDetectionStatusLabel()).toBe('NPU · 14 ms · 1 package');
+    discardPeriodicTasks();
+  }));
+
+  it('updates package status when the observation reports worker failure', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true, effective_status: 'running',
+    })));
+    api.packageDetectionObservationForCamera = jest.fn(() => of(detectionJob({
+      status: 'failed', latest_result: null, target_labels: ['package'],
+    })));
+    spectator = createComponent();
+    expect(spectator.component.packageDetectionStatusLabel()).toBe('Package detection failed.');
+    discardPeriodicTasks();
+  }));
+
   it('saves package alerts from the toggle and removes the extra person and save controls', fakeAsync(() => {
     api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
       desired_enabled: true, effective_status: 'running',
@@ -320,6 +344,37 @@ describe('Harbor Assistant camera component', () => {
     pending$.complete();
     discardPeriodicTasks();
   }));
+  it('does not request person preview after switching away from live tab', fakeAsync(() => {
+    api.personPreview = jest.fn(() => NEVER);
+    spectator = createComponent();
+    const context = { drawImage: jest.fn(), clearRect: jest.fn() };
+    jest.spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(context as unknown as CanvasRenderingContext2D);
+    jest.spyOn(HTMLCanvasElement.prototype, 'toDataURL')
+      .mockReturnValue('data:image/jpeg;base64,/9j/test');
+    const state = spectator.component as unknown as {
+      selectedCameraId: { set: (id: string) => void };
+      packageEventConfig: { set: (config: HarborAssistantPackageEventConfigProjection) => void };
+      hlsLiveStatus: { set: (value: HlsLiveStatus) => void };
+      liveVideo: { nativeElement: HTMLVideoElement };
+      personDetectionOverlay: { nativeElement: HTMLCanvasElement };
+      refreshPersonPreview: () => void;
+    };
+    state.liveVideo = {
+      nativeElement: fakeLiveVideo({
+        videoWidth: 720, videoHeight: 576, paused: false, readyState: 4,
+      }),
+    };
+    state.personDetectionOverlay = { nativeElement: document.createElement('canvas') };
+    state.selectedCameraId.set('cam-1');
+    state.packageEventConfig.set(packageEventConfigProjection({ person_association_enabled: true }));
+    state.hlsLiveStatus.set('live');
+    spectator.component.onCameraTabChange(1);
+    state.refreshPersonPreview();
+    expect(api.personPreview).not.toHaveBeenCalled();
+    discardPeriodicTasks();
+  }));
+
   it('uses snapshot polling instead of long-running MJPEG for stream-only cameras', fakeAsync(() => {
     api.cameraState = jest.fn(() => of(cameraState({
       snapshotUrl: null,
@@ -1359,6 +1414,7 @@ describe('Harbor Assistant camera component', () => {
       effective_status: status,
       effective_stream_profile: 'sub',
     })));
+    api.detectionJobForCamera = jest.fn(() => of(detectionJob({ status, latest_result: null })));
     spectator = createComponent();
     spectator.detectChanges();
 
@@ -1372,7 +1428,7 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it('keeps polling a non-terminal starting observation without overriding effective status', fakeAsync(() => {
+  it('updates starting cat status when a running observation arrives', fakeAsync(() => {
     api.getCatDetectionControl = jest.fn(() => of(catDetectionControlProjection({
       desired_enabled: true,
       effective_status: 'starting',
@@ -1387,7 +1443,7 @@ describe('Harbor Assistant camera component', () => {
     tick(250);
 
     expect(api.detectionJobForCamera).toHaveBeenCalledTimes(2);
-    expect(spectator.component.catDetectionStatusLabel()).toBe('Starting detection...');
+    expect(spectator.component.catDetectionStatusLabel()).toBe('NPU · 14 ms · 1 cat');
     spectator.component.onCameraTabChange(1);
     discardPeriodicTasks();
   }));
@@ -1511,7 +1567,7 @@ describe('Harbor Assistant camera component', () => {
     })));
     api.detectionJobForCamera = jest.fn()
       .mockReturnValueOnce(of(detectionJob()))
-      .mockReturnValueOnce(of(detectionJob({ status: 'failed', latest_result: null })));
+      .mockReturnValue(of(detectionJob({ status: 'failed', latest_result: null })));
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
       catDetectionEnabled: () => boolean;
@@ -1716,10 +1772,11 @@ describe('Harbor Assistant camera component', () => {
     discardPeriodicTasks();
   }));
 
-  it('converges an absent observed detection job without retrying', fakeAsync(() => {
+  it('rechecks an absent cat job and restores metrics when it returns', fakeAsync(() => {
     api.detectionJobForCamera = jest.fn()
       .mockReturnValueOnce(of(detectionJob()))
-      .mockReturnValueOnce(throwError(() => Object.assign(new Error('job not found'), { status: 404 })));
+      .mockReturnValueOnce(throwError(() => Object.assign(new Error('job not found'), { status: 404 })))
+      .mockReturnValue(of(detectionJob()));
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
       catDetectionEnabled: () => boolean;
@@ -1736,8 +1793,12 @@ describe('Harbor Assistant camera component', () => {
     expect(componentState.catDetectionEnabled()).toBe(true);
     expect(componentState.catDetectionJob()).toBeNull();
     expect(componentState.catDetectionError()).toBeNull();
-    tick(4_000);
+    expect(spectator.component.catDetectionStatusLabel()).toBe('Cat detection stopped.');
+    tick(1_999);
     expect(api.detectionJobForCamera).toHaveBeenCalledTimes(2);
+    tick(1);
+    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(3);
+    expect(spectator.component.catDetectionStatusLabel()).toBe('NPU · 14 ms · 1 cat');
     expect(api.detectionJob).not.toHaveBeenCalled();
     discardPeriodicTasks();
   }));
@@ -1760,18 +1821,19 @@ describe('Harbor Assistant camera component', () => {
     expect(componentState.catDetectionJob()).toBeNull();
     expect(componentState.catDetectionError()).toBeNull();
     tick(4_000);
-    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(1);
+    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(3);
     expect(api.detectionJob).not.toHaveBeenCalled();
     discardPeriodicTasks();
   }));
 
-  it('converges a terminal observed detection job without retrying', fakeAsync(() => {
+  it('rechecks a terminal cat job and restores running status', fakeAsync(() => {
     api.detectionJobForCamera = jest.fn()
       .mockReturnValueOnce(of(detectionJob()))
       .mockReturnValueOnce(of(detectionJob({
         status: 'stopped',
         message: 'Detection provider stopped.',
-      })));
+      })))
+      .mockReturnValue(of(detectionJob()));
     spectator = createComponent();
     const componentState = spectator.component as unknown as {
       catDetectionEnabled: () => boolean;
@@ -1789,8 +1851,9 @@ describe('Harbor Assistant camera component', () => {
     expect(componentState.catDetectionJob()).toBeNull();
     expect(componentState.catDetectionError()).toBeNull();
     expect(spectator.component.catDetectionStatusLabel()).toBe('Cat detection stopped.');
-    tick(4_000);
-    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(2);
+    tick(2_000);
+    expect(api.detectionJobForCamera).toHaveBeenCalledTimes(3);
+    expect(spectator.component.catDetectionStatusLabel()).toBe('NPU · 14 ms · 1 cat');
     expect(api.detectionJob).not.toHaveBeenCalled();
     discardPeriodicTasks();
   }));
@@ -2395,6 +2458,7 @@ describe('Harbor Assistant camera component', () => {
     expect(componentState.packageDetectionEnabled()).toBe(true);
     expect(componentState.packageDetectionJob()).toBeNull();
     expect(componentState.packageDetectionError()).toBeNull();
+    expect(spectator.component.packageDetectionStatusLabel()).toBe('Starting package detection...');
     expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(1);
     tick(499);
     expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(1);
@@ -2444,6 +2508,7 @@ describe('Harbor Assistant camera component', () => {
 
     expect(componentState.packageDetectionEnabled()).toBe(true);
     expect(componentState.packageDetectionError()).toBe('Unable to observe package detection.');
+    expect(spectator.component.packageDetectionStatusLabel()).toBe('Package detection failed.');
     expect(api.putPackageDetectionControl).toHaveBeenCalledTimes(1);
     tick(1_999);
     expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(1);
@@ -2451,6 +2516,20 @@ describe('Harbor Assistant camera component', () => {
     expect(api.packageDetectionObservationForCamera).toHaveBeenCalledTimes(2);
     expect(api.putPackageDetectionControl).toHaveBeenCalledTimes(1);
     componentState.setPackageDetectionEnabled(false);
+    discardPeriodicTasks();
+  }));
+
+  it('restores package metrics after a transient observation error', fakeAsync(() => {
+    api.getPackageDetectionControl = jest.fn(() => of(packageDetectionControlProjection({
+      desired_enabled: true, effective_status: 'running',
+    })));
+    api.packageDetectionObservationForCamera = jest.fn()
+      .mockReturnValueOnce(throwError(() => Object.assign(new Error('unavailable'), { status: 503 })))
+      .mockReturnValue(of(detectionJob({ target_labels: ['package'] })));
+    spectator = createComponent();
+    expect(spectator.component.packageDetectionStatusLabel()).toBe('Package detection failed.');
+    tick(2_000);
+    expect(spectator.component.packageDetectionStatusLabel()).toBe('NPU · 14 ms · 1 package');
     discardPeriodicTasks();
   }));
 

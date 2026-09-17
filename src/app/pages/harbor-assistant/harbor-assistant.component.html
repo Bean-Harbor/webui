@@ -130,6 +130,11 @@
                         </div>
                         <h2>{{ eventVlmSummary(stored) }}</h2>
                         <p class="muted">{{ eventLabelPreview(stored) }}</p>
+                        @if (packageRecordingArtifactId(stored); as artifactId) {
+                          <ix-person-recording
+                            [src]="associationRecordingUrl(artifactId)"
+                          ></ix-person-recording>
+                        }
                       </div>
                       <div class="event-intelligence-metrics">
                         <span>

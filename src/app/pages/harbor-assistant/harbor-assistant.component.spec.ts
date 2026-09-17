@@ -93,6 +93,35 @@ describe('Harbor Assistant component', () => {
     expect(spectator.queryAll('.event-intelligence-row')).toHaveLength(1);
   });
 
+  it('opens the original recording for an unpaired package appearance', () => {
+    spectator = createComponent({
+      providers: [
+        { provide: Actions, useValue: of() },
+        mockProvider(ActivatedRoute, { queryParamMap: of(convertToParamMap({ tab: 'camera' })) }),
+      ],
+    });
+    const state = spectator.component as unknown as { localVisionEvents: { set: (value: unknown[]) => void } };
+    state.localVisionEvents.set([{
+      event: {
+        event_id: 'package-appeared-1',
+        event_type: 'package_appeared',
+        camera_id: 'camera-252',
+        started_at: '2026-09-08T08:00:00Z',
+        metrics: {
+          recording_artifacts: [{
+            artifact_id: 'recording-1',
+            mime_type: 'video/mp4',
+            byte_size: 1_024,
+            preview_url: '/v1/dvr/artifacts/recording-1',
+            coverage_verified: true,
+          }],
+        },
+      },
+    }]);
+    spectator.detectChanges();
+    expect(spectator.queryAll('.event-intelligence-row ix-person-recording')).toHaveLength(1);
+  });
+
   it('renders the AI settings subtabs without technical routing copy', () => {
     spectator = createComponent();
     spectator.detectChanges();

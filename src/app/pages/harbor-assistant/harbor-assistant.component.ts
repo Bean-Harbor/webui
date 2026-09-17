@@ -426,6 +426,21 @@ export class HarborAssistantComponent implements OnInit {
 
   protected readonly personAssociationStatusLabels = personAssociationStatusLabels;
 
+  protected packageRecordingArtifactId(stored: StoredLocalVisionEvent): string | null {
+    if (!['package_appeared', 'package_removed', 'package_no_longer_visible'].includes(stored.event.event_type)) {
+      return null;
+    }
+    const artifacts = stored.event.metrics?.recording_artifacts;
+    if (!Array.isArray(artifacts) || artifacts.length !== 1 || !artifacts[0] || typeof artifacts[0] !== 'object') {
+      return null;
+    }
+    const artifact = artifacts[0] as Record<string, unknown>;
+    return artifact.mime_type === 'video/mp4' && artifact.coverage_verified === true
+      && typeof artifact.artifact_id === 'string' && artifact.artifact_id
+      ? artifact.artifact_id
+      : null;
+  }
+
   protected associationRecordingUrl(artifactId: string): string {
     return harborAssistantBeaconApiUrl(`/cameras/recordings/artifacts/${encodeURIComponent(artifactId)}`);
   }

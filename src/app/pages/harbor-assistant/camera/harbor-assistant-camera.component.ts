@@ -1517,6 +1517,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
           return;
         }
         this.packageDetectionTransientError.set(null);
+        if (job.status === 'running' || job.status === 'failed' || job.status === 'starting'
+          || job.status === 'stopping' || job.status === 'stopped') {
+          this.packageDetectionEffectiveStatus.set(job.status);
+        }
         if (job.status === 'running') {
           this.receivePackageDetectionJob(job);
         } else {
@@ -1531,6 +1535,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         }
         this.clearPackageDetectionResult();
         const notFound = this.detectionJobNotFound(error);
+        this.packageDetectionEffectiveStatus.set(notFound ? 'starting' : 'failed');
         if (!notFound) {
           this.packageDetectionTransientError.set(
             this.translate.instant('Unable to observe package detection.'),
@@ -1614,9 +1619,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         }
         if (this.catDetectionObservationIsTerminal(job.status)) {
           this.finishCatDetectionObservation(job.status);
+          this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
           return;
         }
         if (job.status === 'running') {
+          this.catDetectionEffectiveStatus.set('running');
+          this.catDetectionTransientError.set(null);
           this.receiveCatDetectionJob(job);
         }
         this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
@@ -1627,10 +1635,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         }
         if (this.detectionJobNotFound(error)) {
           this.finishCatDetectionObservation('stopped');
+          this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
           return;
         }
         this.catDetectionTransientError.set(this.translate.instant('Unable to observe cat detection.'));
-        this.clearCatDetectionOverlay();
+        this.catDetectionEffectiveStatus.set('failed');
+        this.clearCatDetectionResult();
         this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
       },
     });
@@ -1657,12 +1667,14 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
           }
           this.catDetectionTransientError.set(null);
           if (job.status === 'running') {
+            this.catDetectionEffectiveStatus.set('running');
             this.receiveCatDetectionJob(job);
             this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
             return;
           }
           if (this.catDetectionObservationIsTerminal(job.status)) {
             this.finishCatDetectionObservation(job.status);
+            this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
             return;
           }
           this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
@@ -1673,10 +1685,12 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
           }
           if (this.detectionJobNotFound(error)) {
             this.finishCatDetectionObservation('stopped');
+            this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
             return;
           }
           this.catDetectionTransientError.set(this.translate.instant('Unable to observe cat detection.'));
-          this.clearCatDetectionOverlay();
+          this.catDetectionEffectiveStatus.set('failed');
+          this.clearCatDetectionResult();
           this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
         },
       });
@@ -1696,12 +1710,16 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   private finishCatDetectionObservation(status: string): void {
     this.catDetectionEffectiveStatus.set(status === 'failed' ? 'failed' : 'stopped');
-    this.stopCatDetectionObservation();
+    this.clearCatDetectionResult();
   }
 
   private stopCatDetectionObservation(): void {
     this.catDetectionToken += 1;
     this.clearCatDetectionTimers();
+    this.clearCatDetectionResult();
+  }
+
+  private clearCatDetectionResult(): void {
     this.catDetectionJob.set(null);
     this.catDetectionResultReceivedAtMs = null;
     this.catDetectionResultSequence = null;
@@ -1754,7 +1772,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const canvas = this.personDetectionOverlay?.nativeElement;
     const camera = this.selectedCameraId();
     const context = canvas?.getContext('2d');
-    const active = !!camera && !!video && !!canvas && !video.paused && video.readyState >= 2
+    const active = this.selectedTabIndex() === 0
+      && !!camera && !!video && !!canvas && !video.paused && video.readyState >= 2
       && this.hlsLiveStatus() === 'live' && !document.hidden && this.packageEventConfig()?.person_association_enabled;
     if (!active || this.monotonicNow() - this.personPreviewDisplayedAt > this.personPreviewMaxAgeMs) {
       if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
@@ -1782,6 +1801,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     ).subscribe({
       next: (response) => {
         if (camera !== this.selectedCameraId() || response.camera_id !== camera || response.frame_id !== frameId
+          || frameId !== this.personPreviewFrameId || this.selectedTabIndex() !== 0
           || this.monotonicNow() - captured > this.personPreviewMaxAgeMs || video.paused || document.hidden
           || !this.packageEventConfig()?.person_association_enabled || this.hlsLiveStatus() !== 'live') return;
         canvas.width = video.videoWidth;
@@ -2514,6 +2534,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   onCameraTabChange(index: number): void {
     this.selectedTabIndex.set(index);
     if (index !== 0) {
+      this.personPreviewFrameId += 1;
+      const canvas = this.personDetectionOverlay?.nativeElement;
+      if (canvas) {
+        canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+      }
       this.stopCatDetectionObservation();
       this.stopPackageDetectionObservation();
       return;
