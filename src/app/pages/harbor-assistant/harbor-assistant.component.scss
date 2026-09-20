@@ -221,6 +221,7 @@ $hd-space-5: 20px;
 
 .event-intelligence-main {
   min-width: 0;
+  overflow-wrap: anywhere;
 
   h2 {
     font-size: 16px;
@@ -229,6 +230,10 @@ $hd-space-5: 20px;
     margin: $hd-space-2 0;
     overflow-wrap: anywhere;
   }
+}
+
+.event-intelligence-row.package-association-row {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .event-intelligence-meta,

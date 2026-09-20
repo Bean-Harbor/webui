@@ -259,13 +259,16 @@ export interface HarborAssistantDetectionResult {
   inference_ms: number;
   detection_count: number;
   detections: HarborAssistantDetection[];
+  camera_healthy?: boolean;
+  frame_observable?: boolean;
+  frame_observability_reason?: string;
 }
 
 export interface HarborAssistantDetectionMetrics {
   status: string;
   provider: string;
   frames_processed: number;
-  cat_frames: number;
+  target_frames: number;
   average_inference_ms: number;
   p95_inference_ms: number;
   uptime_ms: number;
@@ -278,6 +281,112 @@ export interface HarborAssistantCatDetectionObservation {
   stream_profile: string;
   latest_result?: HarborAssistantDetectionResult | null;
   metrics?: HarborAssistantDetectionMetrics | null;
+}
+
+export type HarborAssistantCatDetectionStreamProfile = 'sub' | 'main';
+export type HarborAssistantCatDetectionEffectiveStatus
+  = 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
+
+export interface HarborAssistantCatDetectionControlRequest {
+  enabled: boolean;
+  stream_profile: HarborAssistantCatDetectionStreamProfile;
+}
+
+export interface HarborAssistantCatDetectionControlProjection {
+  camera_id: string;
+  explicit: boolean;
+  desired_enabled: boolean;
+  desired_stream_profile: HarborAssistantCatDetectionStreamProfile;
+  effective_status: HarborAssistantCatDetectionEffectiveStatus;
+  effective_stream_profile: HarborAssistantCatDetectionStreamProfile | null;
+  job_id: string | null;
+  updated_at: string | null;
+  message: string | null;
+}
+
+export interface HarborAssistantPackageDetectionControlRequest {
+  enabled: boolean;
+  stream_profile: HarborAssistantCatDetectionStreamProfile;
+}
+
+export interface HarborAssistantPackageDetectionControlProjection {
+  camera_id: string;
+  explicit: boolean;
+  desired_enabled: boolean;
+  desired_stream_profile: HarborAssistantCatDetectionStreamProfile;
+  effective_status: HarborAssistantCatDetectionEffectiveStatus;
+  effective_stream_profile: HarborAssistantCatDetectionStreamProfile | null;
+  job_id: string | null;
+  updated_at: string | null;
+  message: string | null;
+}
+
+export interface HarborAssistantPackageDeliveryZone {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface HarborAssistantPackageEventConfigRequest {
+  person_association_enabled?: boolean;
+  enabled: boolean;
+  zone?: HarborAssistantPackageDeliveryZone;
+}
+
+export type HarborAssistantPackagePresencePhase = 'idle' | 'candidate' | 'present' | 'removing' | 'unknown';
+export type PersonAssociationStatus = 'correlated' | 'not_observed' | 'ambiguous' | 'unavailable';
+
+export interface PersonDetectionBox {
+  label: 'person';
+  confidence: number;
+  normalized_box: { x1: number; y1: number; x2: number; y2: number };
+}
+
+export interface PersonPreviewResponse {
+  camera_id: string;
+  frame_id: number;
+  result: { frames: { detections: PersonDetectionBox[] }[] };
+}
+export type HarborAssistantPackageObservability = 'unknown' | 'healthy' | 'offline' | 'occluded' | 'discontinuous';
+
+export interface HarborAssistantPackageRecordingArtifact {
+  artifact_id: string;
+  mime_type: string;
+  byte_size: number;
+  preview_url: string;
+}
+
+export interface HarborAssistantPackageEventConfigProjection {
+  notification_suppressed?: boolean;
+  removal_notification_suppressed?: boolean;
+  person_association_enabled?: boolean;
+  person_association_ready?: boolean;
+  person_association_readiness_reason?: string;
+  association_event_id?: string | null;
+  person_association_status?: PersonAssociationStatus | null;
+  camera_id: string;
+  explicit: boolean;
+  enabled: boolean;
+  zone: HarborAssistantPackageDeliveryZone;
+  confirm_frames: number;
+  confirm_window_ms: number;
+  max_result_age_ms: number;
+  max_observation_gap_ms: number;
+  revision: number;
+  phase: HarborAssistantPackagePresencePhase;
+  observability: HarborAssistantPackageObservability;
+  event_id: string | null;
+  delivered: boolean;
+  last_error: string | null;
+  removal_event_id: string | null;
+  removal_instance_id: string | null;
+  removal_appeared_event_id: string | null;
+  removed_frame_epoch_ms: number | null;
+  removal_delivered: boolean;
+  removal_last_error: string | null;
+  removal_recording_artifacts: HarborAssistantPackageRecordingArtifact[];
+  removal_recording_error: string | null;
 }
 
 export interface HarborAssistantDetectionJobResponse {

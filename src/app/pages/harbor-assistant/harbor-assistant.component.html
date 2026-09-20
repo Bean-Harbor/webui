@@ -95,8 +95,33 @@
                 <div class="empty-state">{{ 'No local vision events yet.' | translate }}</div>
               } @else {
                 <div class="event-intelligence-list">
-                  @for (stored of localVisionEvents(); track stored.event.event_id) {
-                    <article class="event-intelligence-row">
+                  @for (item of packageAssociationTimeline(); track item.stored.event.event_id) {
+                    @let stored = item.stored;
+                    <article class="event-intelligence-row" [class.package-association-row]="!!item.association">
+                      @if (item.association; as association) {
+                        <div class="event-intelligence-main">
+                          <h2>{{ 'Package status change' | translate }}</h2>
+                          <p>{{ stored.event.started_at | formatDateTime }}</p>
+                          <p>{{ 'The package remains no longer visible.' | translate }}</p>
+                          <p>{{ personAssociationStatusLabels[association.status] | translate }}</p>
+                          <ix-person-recording
+                            [src]="associationRecordingUrl(association.recordingArtifactId)"
+                            [evidence]="association.associationEvent.event.metrics?.['person_evidence']"
+                          ></ix-person-recording>
+                          <details>
+                            <summary>{{ 'Association details' | translate }}</summary>
+                            <p>{{ 'Package event ID' | translate }}: {{ stored.event.event_id }}</p>
+                            <p>{{ 'Association event ID' | translate }}: {{ association.associationEvent.event.event_id }}</p>
+                            <p>{{ 'Package instance ID' | translate }}: {{ stored.event.metrics?.['package_instance_id'] }}</p>
+                            <p>{{ 'Analysis window' | translate }}: {{ association.windowStart | formatDateTime }} – {{ association.windowEnd | formatDateTime }}</p>
+                            <p>{{ 'Qualifying evidence frames' | translate }}: {{ association.evidenceCount }}</p>
+                            <p>{{ 'Model version' | translate }}: {{ association.associationEvent.event.metrics?.['model_version'] }}</p>
+                            <p>{{ 'Threshold version' | translate }}: {{ association.associationEvent.event.metrics?.['threshold_version'] }}</p>
+                            <p>{{ 'Contract version' | translate }}: {{ association.associationEvent.event.metrics?.['association_contract_version'] }}</p>
+                            <p>{{ 'Experimental' | translate }}</p>
+                          </details>
+                        </div>
+                      } @else {
                       <div class="event-intelligence-main">
                         <div class="event-intelligence-meta">
                           <span class="pill" [ngClass]="toneClass(stored.event.event_type)">{{ stored.event.event_type }}</span>
@@ -105,6 +130,11 @@
                         </div>
                         <h2>{{ eventVlmSummary(stored) }}</h2>
                         <p class="muted">{{ eventLabelPreview(stored) }}</p>
+                        @if (packageRecordingArtifactId(stored); as artifactId) {
+                          <ix-person-recording
+                            [src]="associationRecordingUrl(artifactId)"
+                          ></ix-person-recording>
+                        }
                       </div>
                       <div class="event-intelligence-metrics">
                         <span>
@@ -124,6 +154,7 @@
                           {{ 'VLM' | translate }}
                         </span>
                       </div>
+                      }
                     </article>
                   }
                 </div>

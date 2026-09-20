@@ -1,2 +1,6 @@
 *.sh text eol=lf
+*.ts text eol=lf
+*.html text eol=lf
+*.scss text eol=lf
+*.json text eol=lf
 scripts/harbornavi-k3/media-stack-release.env text eol=lf

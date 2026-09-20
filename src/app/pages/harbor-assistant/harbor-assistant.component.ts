@@ -18,6 +18,7 @@ import { TnIconComponent } from '@truenas/ui-components';
 import { Observable, forkJoin, of, timer } from 'rxjs';
 import { catchError, finalize, map, switchMap } from 'rxjs/operators';
 import { WINDOW } from 'app/helpers/window.helper';
+import { FormatDateTimePipe } from 'app/modules/dates/pipes/format-date-time/format-datetime.pipe';
 import { PageHeaderComponent } from 'app/modules/page-header/page-title-header/page-header.component';
 import {
   FolderPickerDialogComponent,
@@ -94,6 +95,11 @@ import {
 import { HarborAssistantSearchComponent } from 'app/pages/harbor-assistant/search/harbor-assistant-search.component';
 import { harborAssistantBeaconApiUrl } from 'app/pages/harbor-assistant/services/harbor-assistant-api-prefix';
 import { HarborAssistantApiService } from 'app/pages/harbor-assistant/services/harbor-assistant-api.service';
+import {
+  personAssociationStatusLabels,
+  projectPackageAssociationTimeline,
+} from 'app/pages/harbor-assistant/shared/package-association-timeline';
+import { PersonRecordingComponent } from 'app/pages/harbor-assistant/shared/person-recording.component';
 import { harborGateConnectorManageUrl, harborGateConnectorSetupUrl } from 'app/pages/harbor-assistant/utils/harborgate-urls';
 
 // New identity fields remain authoritative; these aliases only support older Beacon payloads.
@@ -311,6 +317,8 @@ export const harborAssistantI18nMarkers = [
   },
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
+    PersonRecordingComponent,
+    FormatDateTimePipe,
     MatAnchor,
     MatButton,
     MatIconButton,
@@ -412,6 +420,31 @@ export class HarborAssistantComponent implements OnInit {
   protected readonly shareLinks = signal<ShareLinkSummary[]>([]);
   protected readonly automationReviews = signal<AutomationRuleReview[]>([]);
   protected readonly localVisionEvents = signal<StoredLocalVisionEvent[]>([]);
+  protected readonly packageAssociationTimeline = computed(() => {
+    return projectPackageAssociationTimeline(this.localVisionEvents());
+  });
+
+  protected readonly personAssociationStatusLabels = personAssociationStatusLabels;
+
+  protected packageRecordingArtifactId(stored: StoredLocalVisionEvent): string | null {
+    if (!['package_appeared', 'package_removed', 'package_no_longer_visible'].includes(stored.event.event_type)) {
+      return null;
+    }
+    const artifacts = stored.event.metrics?.recording_artifacts;
+    if (!Array.isArray(artifacts) || artifacts.length !== 1 || !artifacts[0] || typeof artifacts[0] !== 'object') {
+      return null;
+    }
+    const artifact = artifacts[0] as Record<string, unknown>;
+    return artifact.mime_type === 'video/mp4' && artifact.coverage_verified === true
+      && typeof artifact.artifact_id === 'string' && artifact.artifact_id
+      ? artifact.artifact_id
+      : null;
+  }
+
+  protected associationRecordingUrl(artifactId: string): string {
+    return harborAssistantBeaconApiUrl(`/cameras/recordings/artifacts/${encodeURIComponent(artifactId)}`);
+  }
+
   protected readonly evidenceByDevice = signal<Record<string, DeviceEvidenceResponse>>({});
   protected readonly selectedDeviceId = signal<string>('');
   protected readonly pendingDeleteDeviceId = signal<string | null>(null);

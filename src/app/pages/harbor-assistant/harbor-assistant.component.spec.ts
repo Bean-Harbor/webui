@@ -1,6 +1,7 @@
 import { MatDialog } from '@angular/material/dialog';
 import { convertToParamMap, ActivatedRoute, Router } from '@angular/router';
 import { createComponentFactory, mockProvider, Spectator } from '@ngneat/spectator/jest';
+import { Actions } from '@ngrx/effects';
 import { MockComponent } from 'ng-mocks';
 import { of, Subject, throwError } from 'rxjs';
 import { PageHeaderComponent } from 'app/modules/page-header/page-title-header/page-header.component';
@@ -48,6 +49,77 @@ describe('Harbor Assistant component', () => {
         afterClosed: () => of({ path: '/mnt/pool/videos' }),
       })),
     };
+  });
+
+  it('renders a paired association as one row with one recording link and expandable details', () => {
+    spectator = createComponent({
+      providers: [
+        { provide: Actions, useValue: of() },
+        mockProvider(ActivatedRoute, { queryParamMap: of(convertToParamMap({ tab: 'camera' })) }),
+      ],
+    });
+    const metrics = {
+      package_event_id: 'package-1',
+      package_instance_id: 'instance-1',
+      association_event_id: 'association-1',
+      recording_artifact_id: 'recording-1',
+      person_association_status: 'correlated',
+      association_status: 'correlated',
+      analyzed_window: { start_epoch_ms: 95_000, end_epoch_ms: 105_000 },
+      person_evidence: [],
+    };
+    const state = spectator.component as unknown as { localVisionEvents: { set: (value: unknown[]) => void } };
+    state.localVisionEvents.set([
+      {
+        event: {
+          event_id: 'package-1',
+          event_type: 'package_removed',
+          camera_id: 'camera-252',
+          started_at: '2026-09-08T08:00:00Z',
+          metrics,
+        },
+      },
+      {
+        event: {
+          event_id: 'association-1', event_type: 'package_person_association_evaluated', camera_id: 'camera-252', metrics,
+        },
+      },
+    ]);
+    spectator.detectChanges();
+    expect(spectator.queryAll('.package-association-row')).toHaveLength(1);
+    expect(spectator.queryAll('.package-association-row ix-person-recording')).toHaveLength(1);
+    expect(spectator.query('.package-association-row')).toHaveText('Package status change');
+    expect(spectator.query('.package-association-row details')).toExist();
+    expect(spectator.queryAll('.event-intelligence-row')).toHaveLength(1);
+  });
+
+  it('opens the original recording for an unpaired package appearance', () => {
+    spectator = createComponent({
+      providers: [
+        { provide: Actions, useValue: of() },
+        mockProvider(ActivatedRoute, { queryParamMap: of(convertToParamMap({ tab: 'camera' })) }),
+      ],
+    });
+    const state = spectator.component as unknown as { localVisionEvents: { set: (value: unknown[]) => void } };
+    state.localVisionEvents.set([{
+      event: {
+        event_id: 'package-appeared-1',
+        event_type: 'package_appeared',
+        camera_id: 'camera-252',
+        started_at: '2026-09-08T08:00:00Z',
+        metrics: {
+          recording_artifacts: [{
+            artifact_id: 'recording-1',
+            mime_type: 'video/mp4',
+            byte_size: 1_024,
+            preview_url: '/v1/dvr/artifacts/recording-1',
+            coverage_verified: true,
+          }],
+        },
+      },
+    }]);
+    spectator.detectChanges();
+    expect(spectator.queryAll('.event-intelligence-row ix-person-recording')).toHaveLength(1);
   });
 
   it('renders the AI settings subtabs without technical routing copy', () => {

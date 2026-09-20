@@ -11,7 +11,14 @@ import {
 import { harborAssistantPreviewUrl } from 'app/pages/harbor-assistant/shared/harbor-assistant-results';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  PersonPreviewResponse,
+  HarborAssistantCatDetectionControlProjection,
+  HarborAssistantCatDetectionControlRequest,
   HarborAssistantCatDetectionObservation,
+  HarborAssistantPackageDetectionControlProjection,
+  HarborAssistantPackageDetectionControlRequest,
+  HarborAssistantPackageEventConfigProjection,
+  HarborAssistantPackageEventConfigRequest,
   HarborAssistantConversationDetail,
   HarborAssistantConversationListResponse,
   HarborAssistantConversationSettings,
@@ -225,6 +232,101 @@ export class HarborAssistantContentApiService {
         ...options,
         params: request.params,
       },
+    ));
+  }
+
+  getCatDetectionControl(cameraId: string): Observable<HarborAssistantCatDetectionControlProjection> {
+    return this.withUserToken((options) => this.http.get<HarborAssistantCatDetectionControlProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/cat-detection/control`),
+      options,
+    ));
+  }
+
+  putCatDetectionControl(
+    cameraId: string,
+    request: HarborAssistantCatDetectionControlRequest,
+  ): Observable<HarborAssistantCatDetectionControlProjection> {
+    const payload: HarborAssistantCatDetectionControlRequest = {
+      enabled: request.enabled,
+      stream_profile: request.stream_profile,
+    };
+    return this.withUserToken((options) => this.http.put<HarborAssistantCatDetectionControlProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/cat-detection/control`),
+      payload,
+      options,
+    ));
+  }
+
+  getPackageDetectionControl(cameraId: string): Observable<HarborAssistantPackageDetectionControlProjection> {
+    return this.withUserToken((options) => this.http.get<HarborAssistantPackageDetectionControlProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/package-detection/control`),
+      options,
+    ));
+  }
+
+  packageDetectionObservationForCamera(
+    cameraId: string,
+    streamProfile: 'sub' | 'main',
+  ): Observable<HarborAssistantCatDetectionObservation> {
+    return this.withUserToken((options) => this.http.get<HarborAssistantCatDetectionObservation>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/package-detection/observation`),
+      {
+        ...options,
+        params: { stream_profile: streamProfile },
+      },
+    ));
+  }
+
+  putPackageDetectionControl(
+    cameraId: string,
+    request: HarborAssistantPackageDetectionControlRequest,
+  ): Observable<HarborAssistantPackageDetectionControlProjection> {
+    const payload: HarborAssistantPackageDetectionControlRequest = {
+      enabled: request.enabled,
+      stream_profile: request.stream_profile,
+    };
+    return this.withUserToken((options) => this.http.put<HarborAssistantPackageDetectionControlProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/package-detection/control`),
+      payload,
+      options,
+    ));
+  }
+
+  getPackageEventConfig(cameraId: string): Observable<HarborAssistantPackageEventConfigProjection> {
+    return this.withUserToken((options) => this.http.get<HarborAssistantPackageEventConfigProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/package-detection/event-config`),
+      options,
+    ));
+  }
+
+  personPreview(cameraId: string, imageBase64: string, frameId: number): Observable<PersonPreviewResponse> {
+    return this.withUserToken((options) => this.http.post<PersonPreviewResponse>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/person-detection/preview`),
+      { image_base64: imageBase64, frame_id: frameId },
+      options,
+    ));
+  }
+
+  putPackageEventConfig(
+    cameraId: string,
+    request: HarborAssistantPackageEventConfigRequest,
+  ): Observable<HarborAssistantPackageEventConfigProjection> {
+    const payload: HarborAssistantPackageEventConfigRequest = {
+      enabled: request.enabled,
+      ...(request.person_association_enabled === undefined
+        ? {}
+        : { person_association_enabled: request.person_association_enabled }),
+      zone: {
+        left: 0,
+        top: 0,
+        right: 1,
+        bottom: 1,
+      },
+    };
+    return this.withUserToken((options) => this.http.put<HarborAssistantPackageEventConfigProjection>(
+      this.gateApiUrl(`/cameras/${encodeURIComponent(cameraId)}/package-detection/event-config`),
+      payload,
+      options,
     ));
   }
 

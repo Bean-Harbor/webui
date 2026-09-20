@@ -1,5 +1,5 @@
 import { NgClass } from '@angular/common';
-import { ChangeDetectionStrategy, Component, DestroyRef, ElementRef, OnDestroy, OnInit, ViewChild, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, ElementRef, OnDestroy, OnInit, ViewChild, computed, effect, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { NonNullableFormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButton } from '@angular/material/button';
@@ -31,8 +31,13 @@ import {
 } from 'app/pages/harbor-assistant/shared/harbor-assistant-time-range-dialog.component';
 import {
   HarborAssistantCameraLiveSessionResponse,
+  HarborAssistantCatDetectionControlProjection,
+  HarborAssistantCatDetectionEffectiveStatus,
   HarborAssistantCatDetectionObservation,
+  HarborAssistantCatDetectionStreamProfile,
   HarborAssistantDetectionResult,
+  HarborAssistantPackageDetectionControlProjection,
+  HarborAssistantPackageEventConfigProjection,
   HarborAssistantHarborLinkCapabilitiesResponse,
   HarborAssistantSearchCameraStateResponse,
   HarborAssistantSearchResultFilter,
@@ -44,6 +49,7 @@ import {
   HarborAssistantSearchSourceScope,
   HarborAssistantSearchWaterfallItem,
 } from 'app/pages/harbor-assistant/shared/harbor-assistant.interface';
+import { drawPersonBoxes } from 'app/pages/harbor-assistant/shared/person-detection-overlay';
 import {
   HarborAssistantLiveControlsComponent,
   HarborAssistantLivePlaybackMode,
@@ -119,6 +125,11 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   @ViewChild('liveImage') private liveImage?: ElementRef<HTMLImageElement>;
   @ViewChild('liveTransitionFrame') private liveTransitionFrame?: ElementRef<HTMLCanvasElement>;
   @ViewChild('catDetectionOverlay') private catDetectionOverlay?: ElementRef<HTMLCanvasElement>;
+  @ViewChild('personDetectionOverlay') private personDetectionOverlay?: ElementRef<HTMLCanvasElement>;
+  private personPreviewPending = false;
+  private personPreviewFrameId = 0;
+  private personPreviewDisplayedAt = 0;
+  private readonly personPreviewMaxAgeMs = 3000;
   @ViewChild('liveVideo') private liveVideo?: ElementRef<HTMLVideoElement>;
   @ViewChild('playbackVideo') private playbackVideo?: ElementRef<HTMLVideoElement>;
   @ViewChild('mediaViewer') private mediaViewer?: ElementRef<HTMLElement>;
@@ -130,6 +141,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     sourceScope: ['dvr_library' as HarborAssistantSearchSourceScope, Validators.required],
     from: [''],
     to: [''],
+  });
+
+  protected readonly packageEventForm = this.formBuilder.group({
+    enabled: [false],
   });
 
   protected readonly fixtureCameraId = 'public-fixture-dvr';
@@ -199,9 +214,30 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   protected readonly actionBusy = signal<string | null>(null);
   protected readonly actionMessage = signal<string | null>(null);
   protected readonly actionError = signal<string | null>(null);
-  protected readonly catDetectionBusy = signal(false);
-  protected readonly catDetectionEnabled = signal(false);
-  protected readonly catDetectionError = signal<string | null>(null);
+  private readonly catDetectionWritePendingByCamera = signal<ReadonlyMap<string, number>>(new Map());
+  private readonly catDetectionWriteTargetByCamera = signal<ReadonlyMap<string, boolean>>(new Map());
+  protected readonly catDetectionBusy = computed(() => this.catDetectionWritePendingForSelectedCamera());
+  protected readonly catDetectionControlLoaded = signal(false);
+  protected readonly catDetectionDesiredEnabled = signal<boolean | null>(null);
+  protected readonly catDetectionToggleChecked = computed(() => {
+    const deviceId = this.selectedCameraId();
+    return deviceId
+      ? this.catDetectionWriteTargetByCamera().get(deviceId) ?? this.catDetectionDesiredEnabled()
+      : this.catDetectionDesiredEnabled();
+  });
+
+  protected readonly catDetectionEnabled = computed(() => this.catDetectionDesiredEnabled() === true);
+  private readonly catDetectionTransientError = signal<string | null>(null);
+  private readonly catDetectionWriteError = signal<{ cameraId: string; message: string } | null>(null);
+
+  protected readonly catDetectionError = computed(() => {
+    const writeError = this.catDetectionWriteError();
+    return writeError?.cameraId === this.selectedCameraId()
+      ? writeError.message
+      : this.catDetectionTransientError();
+  });
+
+  protected readonly catDetectionEffectiveStatus = signal<HarborAssistantCatDetectionEffectiveStatus | null>(null);
   protected readonly catDetectionJob = signal<HarborAssistantCatDetectionObservation | null>(null);
   protected readonly mediaLibraryExpanded = signal(true);
   protected readonly selectedMediaItem = signal<HarborAssistantSearchMediaItem | null>(null);
@@ -218,7 +254,61 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private catDetectionResultReceivedAtMs: number | null = null;
   private catDetectionResultSequence: number | null = null;
   private catDetectionToken = 0;
-  private catDetectionRequestedEnabled = false;
+  private catDetectionControlToken = 0;
+  private catDetectionWriteToken = 0;
+  private readonly catDetectionReloadPendingCameraIds = new Set<string>();
+  private readonly confirmedCatDetectionControls = new Map<string, HarborAssistantCatDetectionControlProjection>();
+  private readonly packageDetectionWritePendingByCamera = signal<ReadonlyMap<string, number>>(new Map());
+  private readonly packageDetectionWriteTargetByCamera = signal<ReadonlyMap<string, boolean>>(new Map());
+  protected readonly packageDetectionBusy = computed(() => (
+    this.packageDetectionWritePendingForSelectedCamera()
+  ));
+
+  protected readonly packageDetectionControlLoaded = signal(false);
+  protected readonly packageDetectionDesiredEnabled = signal<boolean | null>(null);
+  protected readonly packageDetectionToggleChecked = computed(() => {
+    const deviceId = this.selectedCameraId();
+    return deviceId
+      ? this.packageDetectionWriteTargetByCamera().get(deviceId) ?? this.packageDetectionDesiredEnabled()
+      : this.packageDetectionDesiredEnabled();
+  });
+
+  protected readonly packageDetectionEnabled = computed(() => this.packageDetectionDesiredEnabled() === true);
+
+  private readonly packageDetectionTransientError = signal<string | null>(null);
+  private readonly packageDetectionWriteError = signal<{ cameraId: string; message: string } | null>(null);
+  protected readonly packageDetectionError = computed(() => {
+    const writeError = this.packageDetectionWriteError();
+    return writeError?.cameraId === this.selectedCameraId()
+      ? writeError.message
+      : this.packageDetectionTransientError();
+  });
+
+  protected readonly packageDetectionEffectiveStatus = signal<
+    HarborAssistantCatDetectionEffectiveStatus | null
+  >(null);
+
+  protected readonly packageDetectionJob = signal<HarborAssistantCatDetectionObservation | null>(null);
+  protected readonly packageEventConfigLoaded = signal(false);
+  protected readonly packageEventConfigBusy = signal(false);
+  protected readonly packageEventConfigError = signal<string | null>(null);
+  protected readonly packageEventConfig = signal<HarborAssistantPackageEventConfigProjection | null>(null);
+
+  private packageDetectionPollTimer: number | null = null;
+  private packageDetectionResultReceivedAtMs: number | null = null;
+  private packageDetectionResultSequence: number | null = null;
+  private packageDetectionToken = 0;
+  private packageDetectionControlToken = 0;
+  private packageDetectionWriteToken = 0;
+  private packageEventConfigToken = 0;
+  private packageEventStatusRefreshToken = 0;
+  private readonly packageEventStatusRefreshPendingCameraIds = new Set<string>();
+  private readonly packageDetectionReloadPendingCameraIds = new Set<string>();
+  private readonly confirmedPackageDetectionControls = new Map<
+    string,
+    HarborAssistantPackageDetectionControlProjection
+  >();
+
   private hlsAttachToken = 0;
   private hlsPlaybackToken = 0;
   private hlsWarmToken = 0;
@@ -228,7 +318,6 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private liveStopPending = false;
   private liveStopUnconfirmed = false;
   private liveStreamSwitchTarget: HarborAssistantLiveStreamProfile | null = null;
-  private liveStreamSwitchRestoreCatDetection = false;
   private destroyed = false;
   private hlsWarmSession: HarborAssistantCameraLiveSessionResponse | null = null;
   private hlsWarmStartRequest: HarborAssistantHlsWarmStartRequest | null = null;
@@ -304,11 +393,27 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private readonly catDetectionResultMaxAgeMs = 1_500;
   private readonly liveStopTimeoutMs = 5_000;
 
+  constructor() {
+    effect(() => {
+      const disabled = !this.packageEventConfigLoaded()
+        || !this.packageDetectionDesiredEnabled()
+        || this.packageDetectionControlDisabled()
+        || this.packageEventConfigBusy();
+      const control = this.packageEventForm.controls.enabled;
+      if (disabled) {
+        control.disable({ emitEvent: false });
+      } else {
+        control.enable({ emitEvent: false });
+      }
+    });
+  }
+
   ngOnInit(): void {
+    timer(0, 1000).pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => this.refreshPersonPreview());
     this.refreshCameraDvr();
     fromEvent(this.window, 'pagehide').pipe(
       takeUntilDestroyed(this.destroyRef),
-    ).subscribe(() => this.stopCatDetectionOnPageExit());
+    ).subscribe(() => this.stopDetectionObservationOnPageExit());
     fromEvent(document, 'visibilitychange').pipe(
       takeUntilDestroyed(this.destroyRef),
     ).subscribe(() => this.handleLiveDocumentVisibilityChange());
@@ -366,6 +471,13 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   refreshCameraDvr(): void {
+    const deviceId = this.selectedCameraId();
+    if (!this.deferCatDetectionControlLoadForPendingWrite(deviceId)) {
+      this.prepareCatDetectionControlLoad(deviceId);
+    }
+    if (!this.deferPackageDetectionControlLoadForPendingWrite(deviceId)) {
+      this.preparePackageDetectionControlLoad(deviceId);
+    }
     this.cameraLoading.set(true);
     this.cameraError.set(null);
     const refreshErrors: string[] = [];
@@ -425,14 +537,18 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     this.cameras.set(devices);
     if (selected !== currentSelection) {
+      this.clearDetectionWriteTargets();
       this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(selected));
     }
     this.selectedCameraId.set(selected);
+    this.loadCatDetectionControl(selected);
+    this.loadPackageDetectionControl(selected);
     this.scheduleHlsLivePrewarm();
   }
 
   selectCamera(deviceId: string): void {
     if (deviceId !== this.selectedCameraId()) {
+      this.clearDetectionWriteTargets();
       this.stopLive(false);
       this.stopHlsWarmSession();
       this.selectedStreamProfile.set(this.defaultStreamProfileForCamera(deviceId));
@@ -445,11 +561,22 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.refreshCameraDvr();
   }
 
+  private clearDetectionWriteTargets(): void {
+    this.catDetectionWriteTargetByCamera.set(new Map());
+    this.packageDetectionWriteTargetByCamera.set(new Map());
+  }
+
   selectStreamProfile(profile: HarborAssistantLiveStreamProfile): void {
     if (profile !== 'sub' && profile !== 'main') {
       return;
     }
     if (profile === this.selectedStreamProfile()) {
+      return;
+    }
+    if (this.deferCatDetectionControlLoadForPendingWrite(this.selectedCameraId())) {
+      return;
+    }
+    if (this.deferPackageDetectionControlLoadForPendingWrite(this.selectedCameraId())) {
       return;
     }
     if (this.liveStreamSwitching() || this.hlsLiveStatus() === 'starting') {
@@ -461,6 +588,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     }
     this.stopHlsWarmSession();
     this.selectedStreamProfile.set(profile);
+    this.loadCatDetectionControl(this.selectedCameraId());
+    this.loadPackageDetectionControl(this.selectedCameraId());
     this.scheduleHlsLivePrewarm();
   }
 
@@ -475,10 +604,10 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.beginLiveTransportTransition('webrtc');
     this.liveStreamSwitchTarget = profile;
     this.liveStreamSwitching.set(true);
-    this.liveStreamSwitchRestoreCatDetection = this.catDetectionRequestedEnabled || this.catDetectionEnabled();
     this.selectedStreamProfile.set(profile);
     this.showLiveFeedback(`Switching to ${profile} stream...`, 1800);
-    this.stopCatDetection();
+    this.loadCatDetectionControl(deviceId);
+    this.loadPackageDetectionControl(deviceId);
     this.hlsAttachToken += 1;
     this.hlsPlaybackToken += 1;
     this.hlsRecoveryAttempts = 0;
@@ -745,13 +874,35 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   catDetectionCanStart(): boolean {
-    return Boolean(this.selectedCameraId())
-      && this.hlsLiveStatus() === 'live';
+    return !this.catDetectionControlDisabled();
+  }
+
+  catDetectionWritePendingForSelectedCamera(): boolean {
+    const deviceId = this.selectedCameraId();
+    return Boolean(deviceId && this.catDetectionWritePendingByCamera().has(deviceId));
+  }
+
+  catDetectionControlDisabled(): boolean {
+    const status = this.catDetectionEffectiveStatus();
+    return !this.selectedCameraId()
+      || !this.catDetectionControlLoaded()
+      || this.catDetectionBusy()
+      || (!this.catDetectionDesiredEnabled() && (status === 'starting' || status === 'stopping'));
   }
 
   catDetectionStatusLabel(): string {
-    if (this.catDetectionBusy()) {
-      return this.translate.instant(this.catDetectionJob() ? 'Stopping detection...' : 'Starting detection...');
+    const effectiveStatus = this.catDetectionEffectiveStatus();
+    if (effectiveStatus === 'starting') {
+      return this.translate.instant('Starting detection...');
+    }
+    if (effectiveStatus === 'stopping') {
+      return this.translate.instant('Stopping detection...');
+    }
+    if (effectiveStatus === 'failed') {
+      return this.translate.instant('Cat detection failed.');
+    }
+    if (effectiveStatus === 'stopped') {
+      return this.translate.instant('Cat detection stopped.');
     }
     const job = this.catDetectionJob();
     const result = job?.latest_result;
@@ -763,7 +914,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       device = 'CPU';
     }
     if (!result) {
-      return device ?? this.translate.instant('Waiting for first result...');
+      return this.translate.instant('Cat detection running.');
     }
     const cats = this.translate.instant('{count, plural, one {# cat} other {# cats}}', {
       count: result.detection_count,
@@ -772,54 +923,725 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   }
 
   setCatDetectionEnabled(enabled: boolean): void {
-    this.catDetectionRequestedEnabled = enabled;
-    if (enabled) {
-      this.startCatDetection();
+    const deviceId = this.selectedCameraId();
+    if (!deviceId || this.catDetectionControlDisabled()) {
       return;
     }
-    this.stopCatDetection();
+
+    this.catDetectionControlToken += 1;
+    const writeToken = ++this.catDetectionWriteToken;
+    const observationToken = this.catDetectionToken;
+    const confirmedProjection = this.confirmedCatDetectionControls.get(deviceId) ?? null;
+    const writeTargets = new Map(this.catDetectionWriteTargetByCamera());
+    writeTargets.set(deviceId, enabled);
+    this.catDetectionWriteTargetByCamera.set(writeTargets);
+    const pendingWrites = new Map(this.catDetectionWritePendingByCamera());
+    pendingWrites.set(deviceId, writeToken);
+    this.catDetectionWritePendingByCamera.set(pendingWrites);
+    if (this.catDetectionWriteError()?.cameraId === deviceId) {
+      this.catDetectionWriteError.set(null);
+    }
+    this.catDetectionTransientError.set(null);
+    this.api.putCatDetectionControl(deviceId, {
+      enabled,
+      stream_profile: this.selectedStreamProfile(),
+    }).subscribe({
+      next: (projection) => {
+        this.settleCatDetectionWrite(
+          deviceId,
+          writeToken,
+          confirmedProjection,
+          projection,
+          observationToken === this.catDetectionToken,
+        );
+      },
+      error: (error: unknown) => {
+        const message = this.errorHasStatus(error, 409)
+          ? this.translate.instant('Please turn off package detection before enabling cat detection.')
+          : this.translate.instant('Unable to update cat detection.');
+        this.settleCatDetectionWrite(deviceId, writeToken, confirmedProjection, null, false, message);
+      },
+    });
   }
 
-  private startCatDetection(): void {
+  private loadCatDetectionControl(deviceId: string | null): void {
+    if (this.deferCatDetectionControlLoadForPendingWrite(deviceId)) {
+      return;
+    }
+    this.prepareCatDetectionControlLoad(deviceId);
+    const requestToken = this.catDetectionControlToken;
+    if (!deviceId) {
+      return;
+    }
+    const observationToken = this.catDetectionToken;
+    this.api.getCatDetectionControl(deviceId).pipe(
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (projection) => {
+        if (!this.catDetectionControlRequestIsCurrent(deviceId, requestToken)) {
+          return;
+        }
+        this.applyCatDetectionControlProjection(
+          projection,
+          observationToken === this.catDetectionToken,
+        );
+      },
+      error: () => {
+        if (!this.catDetectionControlRequestIsCurrent(deviceId, requestToken)) {
+          return;
+        }
+        this.catDetectionControlLoaded.set(false);
+        this.catDetectionTransientError.set(this.translate.instant('Unable to read cat detection status.'));
+      },
+    });
+  }
+
+  private deferCatDetectionControlLoadForPendingWrite(deviceId: string | null): boolean {
+    if (!deviceId || !this.catDetectionWritePendingByCamera().has(deviceId)) {
+      return false;
+    }
+    this.catDetectionReloadPendingCameraIds.add(deviceId);
+    this.prepareCatDetectionControlLoad(deviceId);
+    return true;
+  }
+
+  private settleCatDetectionWrite(
+    deviceId: string,
+    writeToken: number,
+    confirmedProjection: HarborAssistantCatDetectionControlProjection | null,
+    projection: HarborAssistantCatDetectionControlProjection | null,
+    observe: boolean,
+    errorMessage = this.translate.instant('Unable to update cat detection.'),
+  ): void {
+    if (this.catDetectionWritePendingByCamera().get(deviceId) !== writeToken) {
+      return;
+    }
+    const pendingWrites = new Map(this.catDetectionWritePendingByCamera());
+    pendingWrites.delete(deviceId);
+    this.catDetectionWritePendingByCamera.set(pendingWrites);
+    const writeTargets = new Map(this.catDetectionWriteTargetByCamera());
+    writeTargets.delete(deviceId);
+    this.catDetectionWriteTargetByCamera.set(writeTargets);
+    const reloadRequested = this.catDetectionReloadPendingCameraIds.delete(deviceId);
+    if (this.destroyed || deviceId !== this.selectedCameraId()) {
+      return;
+    }
+    if (projection) {
+      this.applyCatDetectionControlProjection(projection, observe && !reloadRequested);
+    } else {
+      this.stopCatDetectionObservation();
+      if (confirmedProjection) {
+        this.restoreConfirmedCatDetectionControl(confirmedProjection);
+      }
+      this.catDetectionWriteError.set({
+        cameraId: deviceId,
+        message: errorMessage,
+      });
+    }
+    if (reloadRequested) {
+      this.loadCatDetectionControl(deviceId);
+    }
+  }
+
+  private prepareCatDetectionControlLoad(deviceId: string | null): void {
+    this.catDetectionControlToken += 1;
+    this.catDetectionControlLoaded.set(false);
+    this.catDetectionTransientError.set(null);
+    this.stopCatDetectionObservation();
+    if (!deviceId) {
+      this.catDetectionDesiredEnabled.set(null);
+      this.catDetectionEffectiveStatus.set(null);
+      return;
+    }
+
+    const confirmedProjection = this.confirmedCatDetectionControls.get(deviceId) ?? null;
+    if (confirmedProjection) {
+      this.restoreConfirmedCatDetectionControl(confirmedProjection);
+      this.catDetectionControlLoaded.set(false);
+    } else {
+      this.catDetectionDesiredEnabled.set(null);
+      this.catDetectionEffectiveStatus.set(null);
+    }
+  }
+
+  private catDetectionControlRequestIsCurrent(deviceId: string, requestToken: number): boolean {
+    return !this.destroyed
+      && requestToken === this.catDetectionControlToken
+      && deviceId === this.selectedCameraId();
+  }
+
+  private applyCatDetectionControlProjection(
+    projection: HarborAssistantCatDetectionControlProjection,
+    observe: boolean,
+  ): void {
     const deviceId = this.selectedCameraId();
+    if (!deviceId || projection.camera_id !== deviceId) {
+      return;
+    }
+    this.confirmedCatDetectionControls.set(deviceId, projection);
+    this.catDetectionControlLoaded.set(true);
+    this.catDetectionTransientError.set(null);
+    this.restoreConfirmedCatDetectionControl(projection);
+    if (!projection.desired_enabled) {
+      this.stopCatDetectionObservation();
+      return;
+    }
+    if (observe) {
+      this.startCatDetectionObservation(
+        deviceId,
+        projection.effective_stream_profile ?? projection.desired_stream_profile,
+      );
+    }
+  }
+
+  private restoreConfirmedCatDetectionControl(projection: HarborAssistantCatDetectionControlProjection): void {
+    this.catDetectionDesiredEnabled.set(projection.desired_enabled);
+    this.catDetectionEffectiveStatus.set(projection.effective_status);
+  }
+
+  packageDetectionWritePendingForSelectedCamera(): boolean {
+    const deviceId = this.selectedCameraId();
+    return Boolean(deviceId && this.packageDetectionWritePendingByCamera().has(deviceId));
+  }
+
+  packageDetectionControlDisabled(): boolean {
+    const status = this.packageDetectionEffectiveStatus();
+    return !this.selectedCameraId()
+      || !this.packageDetectionControlLoaded()
+      || this.packageDetectionBusy()
+      || (!this.packageDetectionDesiredEnabled() && (status === 'starting' || status === 'stopping'));
+  }
+
+  packageDetectionStatusLabel(): string {
+    switch (this.packageDetectionEffectiveStatus()) {
+      case 'starting':
+        return this.translate.instant('Starting package detection...');
+      case 'running':
+        return this.packageDetectionMetricsLabel();
+      case 'stopping':
+        return this.translate.instant('Stopping package detection...');
+      case 'failed':
+        return this.translate.instant('Package detection failed.');
+      case 'stopped':
+        return this.translate.instant('Package detection stopped.');
+      default:
+        return '';
+    }
+  }
+
+  private packageDetectionMetricsLabel(): string {
+    const job = this.packageDetectionJob();
+    const result = job?.latest_result;
+    if (!result) {
+      return this.translate.instant('Package detection running.');
+    }
+    const provider = result.provider ?? job?.metrics?.provider ?? '';
+    let device: 'CPU' | 'NPU' | null = null;
+    if (provider.includes('SpaceMIT') || provider === 'spacemit') {
+      device = 'NPU';
+    } else if (provider === 'CPUExecutionProvider') {
+      device = 'CPU';
+    }
+    const packages = this.translate.instant('{count, plural, one {# package} other {# packages}}', {
+      count: result.detection_count,
+    });
+    return `${device ?? this.translate.instant('Provider unknown')} · ${result.inference_ms} ms · ${packages}`;
+  }
+
+  setPackageDetectionEnabled(enabled: boolean): void {
+    const deviceId = this.selectedCameraId();
+    if (!deviceId || this.packageDetectionControlDisabled()) {
+      return;
+    }
+
+    this.packageDetectionControlToken += 1;
+    const writeToken = ++this.packageDetectionWriteToken;
+    const confirmedProjection = this.confirmedPackageDetectionControls.get(deviceId) ?? null;
+    const writeTargets = new Map(this.packageDetectionWriteTargetByCamera());
+    writeTargets.set(deviceId, enabled);
+    this.packageDetectionWriteTargetByCamera.set(writeTargets);
+    const pendingWrites = new Map(this.packageDetectionWritePendingByCamera());
+    pendingWrites.set(deviceId, writeToken);
+    this.packageDetectionWritePendingByCamera.set(pendingWrites);
+    if (this.packageDetectionWriteError()?.cameraId === deviceId) {
+      this.packageDetectionWriteError.set(null);
+    }
+    this.packageDetectionTransientError.set(null);
+    this.api.putPackageDetectionControl(deviceId, {
+      enabled,
+      stream_profile: this.selectedStreamProfile(),
+    }).subscribe({
+      next: (projection) => this.settlePackageDetectionWrite(
+        deviceId,
+        writeToken,
+        confirmedProjection,
+        projection,
+      ),
+      error: (error: unknown) => {
+        const message = this.errorHasStatus(error, 409)
+          ? this.translate.instant('Please turn off cat detection before enabling package detection.')
+          : this.translate.instant('Unable to update package detection.');
+        this.settlePackageDetectionWrite(deviceId, writeToken, confirmedProjection, null, message);
+      },
+    });
+  }
+
+  private loadPackageDetectionControl(deviceId: string | null): void {
+    this.loadPackageEventConfig(deviceId);
+    if (this.deferPackageDetectionControlLoadForPendingWrite(deviceId)) {
+      return;
+    }
+    this.preparePackageDetectionControlLoad(deviceId);
+    const requestToken = this.packageDetectionControlToken;
+    if (!deviceId) {
+      return;
+    }
+    this.api.getPackageDetectionControl(deviceId).pipe(
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (projection) => {
+        if (!this.packageDetectionControlRequestIsCurrent(deviceId, requestToken)) {
+          return;
+        }
+        this.applyPackageDetectionControlProjection(projection);
+      },
+      error: () => {
+        if (!this.packageDetectionControlRequestIsCurrent(deviceId, requestToken)) {
+          return;
+        }
+        this.packageDetectionControlLoaded.set(false);
+        this.packageDetectionTransientError.set(this.translate.instant('Unable to read package detection status.'));
+      },
+    });
+  }
+
+  protected savePackageEventConfig(): void {
+    const deviceId = this.selectedCameraId();
+    if (!deviceId || this.packageEventConfigBusy() || this.packageEventForm.invalid) {
+      return;
+    }
+    const value = this.packageEventForm.getRawValue();
+    const confirmedProjection = this.packageEventConfig();
+    this.packageEventConfigToken += 1;
+    this.packageEventStatusRefreshToken += 1;
+    this.packageEventConfigBusy.set(true);
+    this.packageEventConfigError.set(null);
+    this.api.putPackageEventConfig(deviceId, {
+      enabled: value.enabled,
+    }).pipe(
+      finalize(() => {
+        this.packageEventConfigBusy.set(false);
+      }),
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (projection) => {
+        if (!this.destroyed && deviceId === this.selectedCameraId()) {
+          this.packageEventConfigToken += 1;
+          this.applyPackageEventConfig(projection);
+        }
+      },
+      error: () => {
+        if (!this.destroyed && deviceId === this.selectedCameraId()) {
+          this.packageEventConfigToken += 1;
+          if (confirmedProjection) {
+            this.applyPackageEventConfig(confirmedProjection);
+          }
+          this.packageEventConfigError.set(this.translate.instant('Unable to update package alerts.'));
+        }
+      },
+    });
+  }
+
+  protected packageEventPhaseLabel(): string {
+    if (!this.packageDetectionDesiredEnabled()) {
+      return this.translate.instant('Package detection stopped.');
+    }
+    if (!this.packageEventConfig()?.enabled) {
+      return this.translate.instant('Package alerts are off. Events are still recorded.');
+    }
+    switch (this.packageEventConfig()?.phase) {
+      case 'candidate':
+        return this.translate.instant('Confirming package...');
+      case 'present':
+        if (this.packageEventConfig()?.notification_suppressed) {
+          return this.translate.instant('Package detected. No alert will be sent.');
+        }
+        return this.packageEventConfig()?.delivered
+          ? this.translate.instant('Package alert delivered.')
+          : this.translate.instant('Package alert pending.');
+      case 'removing':
+        return this.translate.instant('Confirming package removal...');
+      case 'unknown':
+        return this.translate.instant('Package status cannot be determined.');
+      default:
+        if (this.packageEventConfig()?.removal_event_id) {
+          if (this.packageEventConfig()?.removal_notification_suppressed) {
+            return this.translate.instant('Package removal detected. No alert will be sent.');
+          }
+          return this.packageEventConfig()?.removal_delivered
+            ? this.translate.instant('Package removal alert delivered.')
+            : this.translate.instant('Package removal alert pending.');
+        }
+        return this.translate.instant('Waiting for package.');
+    }
+  }
+
+  private loadPackageEventConfig(deviceId: string | null): void {
+    if (this.packageEventConfigBusy() && this.packageEventConfigLoaded()
+      && deviceId === this.packageEventConfig()?.camera_id) {
+      return;
+    }
+    const token = ++this.packageEventConfigToken;
+    this.packageEventConfigLoaded.set(false);
+    this.packageEventConfigError.set(null);
+    if (!deviceId) {
+      this.packageEventConfig.set(null);
+      this.packageEventForm.reset({
+        enabled: false,
+      });
+      return;
+    }
+    this.api.getPackageEventConfig(deviceId).pipe(
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (projection) => {
+        if (token === this.packageEventConfigToken && deviceId === this.selectedCameraId()) {
+          this.applyPackageEventConfig(projection);
+        }
+      },
+      error: () => {
+        if (token === this.packageEventConfigToken && deviceId === this.selectedCameraId()) {
+          this.packageEventConfigError.set(this.translate.instant('Unable to read package alert settings.'));
+        }
+      },
+    });
+  }
+
+  private applyPackageEventConfig(projection: HarborAssistantPackageEventConfigProjection): void {
+    if (projection.camera_id !== this.selectedCameraId()) {
+      return;
+    }
+    this.packageEventConfig.set(projection);
+    this.packageEventConfigLoaded.set(true);
+    this.packageEventConfigError.set(projection.last_error);
+    this.packageEventForm.setValue({
+      enabled: projection.enabled,
+    });
+  }
+
+  private refreshPackageEventStatus(deviceId: string, observationToken: number): void {
     if (
-      !deviceId
-      || !this.catDetectionCanStart()
-      || this.catDetectionBusy()
-      || this.catDetectionEnabled()
-      || this.catDetectionJob()
+      !this.packageDetectionObservationIsCurrent(deviceId, observationToken)
+      || !this.packageDetectionDesiredEnabled()
+      || this.packageEventConfigBusy()
+      || this.packageEventStatusRefreshPendingCameraIds.has(deviceId)
     ) {
       return;
     }
+    this.packageEventStatusRefreshPendingCameraIds.add(deviceId);
+    const statusRefreshToken = ++this.packageEventStatusRefreshToken;
+    this.api.getPackageEventConfig(deviceId).pipe(
+      finalize(() => this.packageEventStatusRefreshPendingCameraIds.delete(deviceId)),
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (projection) => {
+        if (!this.packageEventStatusRefreshIsCurrent(deviceId, observationToken, statusRefreshToken)) {
+          return;
+        }
+        const current = this.packageEventConfig();
+        if (!current || projection.camera_id !== deviceId) {
+          return;
+        }
+        this.packageEventConfig.set({
+          ...current,
+          phase: projection.phase,
+          observability: projection.observability,
+          delivered: projection.delivered,
+          notification_suppressed: projection.notification_suppressed,
+          removal_notification_suppressed: projection.removal_notification_suppressed,
+          last_error: projection.last_error,
+          removal_event_id: projection.removal_event_id,
+          removal_instance_id: projection.removal_instance_id,
+          removal_appeared_event_id: projection.removal_appeared_event_id,
+          removed_frame_epoch_ms: projection.removed_frame_epoch_ms,
+          removal_delivered: projection.removal_delivered,
+          removal_last_error: projection.removal_last_error,
+          removal_recording_artifacts: projection.removal_recording_artifacts,
+          removal_recording_error: projection.removal_recording_error,
+        });
+        this.packageEventConfigError.set(projection.last_error);
+      },
+      error: () => undefined,
+    });
+  }
 
-    const token = ++this.catDetectionToken;
-    this.catDetectionBusy.set(true);
-    this.catDetectionEnabled.set(true);
-    this.catDetectionError.set(null);
-    const streamProfile = this.selectedStreamProfile();
+  private packageEventStatusRefreshIsCurrent(
+    deviceId: string,
+    observationToken: number,
+    statusRefreshToken: number,
+  ): boolean {
+    return this.packageDetectionObservationIsCurrent(deviceId, observationToken)
+      && statusRefreshToken === this.packageEventStatusRefreshToken
+      && !this.packageEventConfigBusy()
+      && this.packageDetectionDesiredEnabled() === true;
+  }
+
+  private deferPackageDetectionControlLoadForPendingWrite(deviceId: string | null): boolean {
+    if (!deviceId || !this.packageDetectionWritePendingByCamera().has(deviceId)) {
+      return false;
+    }
+    this.packageDetectionReloadPendingCameraIds.add(deviceId);
+    this.preparePackageDetectionControlLoad(deviceId);
+    return true;
+  }
+
+  private settlePackageDetectionWrite(
+    deviceId: string,
+    writeToken: number,
+    confirmedProjection: HarborAssistantPackageDetectionControlProjection | null,
+    projection: HarborAssistantPackageDetectionControlProjection | null,
+    errorMessage = this.translate.instant('Unable to update package detection.'),
+  ): void {
+    if (this.packageDetectionWritePendingByCamera().get(deviceId) !== writeToken) {
+      return;
+    }
+    const pendingWrites = new Map(this.packageDetectionWritePendingByCamera());
+    pendingWrites.delete(deviceId);
+    this.packageDetectionWritePendingByCamera.set(pendingWrites);
+    const writeTargets = new Map(this.packageDetectionWriteTargetByCamera());
+    writeTargets.delete(deviceId);
+    this.packageDetectionWriteTargetByCamera.set(writeTargets);
+    const reloadRequested = this.packageDetectionReloadPendingCameraIds.delete(deviceId);
+    if (this.destroyed || deviceId !== this.selectedCameraId()) {
+      return;
+    }
+    if (projection) {
+      this.applyPackageDetectionControlProjection(projection);
+      this.loadPackageEventConfig(deviceId);
+    } else {
+      if (confirmedProjection) {
+        this.restoreConfirmedPackageDetectionControl(confirmedProjection);
+      }
+      this.packageDetectionWriteError.set({ cameraId: deviceId, message: errorMessage });
+    }
+    if (reloadRequested) {
+      this.loadPackageDetectionControl(deviceId);
+    }
+  }
+
+  private preparePackageDetectionControlLoad(deviceId: string | null): void {
+    this.packageDetectionControlToken += 1;
+    this.packageDetectionControlLoaded.set(false);
+    this.packageDetectionTransientError.set(null);
+    this.stopPackageDetectionObservation();
+    if (!deviceId) {
+      this.packageDetectionDesiredEnabled.set(null);
+      this.packageDetectionEffectiveStatus.set(null);
+      return;
+    }
+    const confirmedProjection = this.confirmedPackageDetectionControls.get(deviceId) ?? null;
+    if (confirmedProjection) {
+      this.restoreConfirmedPackageDetectionControl(confirmedProjection);
+    } else {
+      this.packageDetectionDesiredEnabled.set(null);
+      this.packageDetectionEffectiveStatus.set(null);
+    }
+  }
+
+  private packageDetectionControlRequestIsCurrent(deviceId: string, requestToken: number): boolean {
+    return !this.destroyed
+      && requestToken === this.packageDetectionControlToken
+      && deviceId === this.selectedCameraId();
+  }
+
+  private applyPackageDetectionControlProjection(
+    projection: HarborAssistantPackageDetectionControlProjection,
+  ): void {
+    const deviceId = this.selectedCameraId();
+    if (!deviceId || projection.camera_id !== deviceId) {
+      return;
+    }
+    this.confirmedPackageDetectionControls.set(deviceId, projection);
+    this.packageDetectionControlLoaded.set(true);
+    this.packageDetectionTransientError.set(null);
+    this.restoreConfirmedPackageDetectionControl(projection);
+    if (!projection.desired_enabled) {
+      this.stopPackageDetectionObservation();
+      return;
+    }
+    if (
+      projection.desired_enabled
+      && projection.desired_stream_profile !== this.selectedStreamProfile()
+      && !this.liveStreamSwitching()
+      && !this.packageDetectionBusy()
+    ) {
+      this.setPackageDetectionEnabled(true);
+      return;
+    }
+    this.startPackageDetectionObservation(
+      deviceId,
+      projection.effective_stream_profile ?? projection.desired_stream_profile,
+    );
+  }
+
+  private restoreConfirmedPackageDetectionControl(
+    projection: HarborAssistantPackageDetectionControlProjection,
+  ): void {
+    this.packageDetectionDesiredEnabled.set(projection.desired_enabled);
+    this.packageDetectionEffectiveStatus.set(projection.effective_status);
+  }
+
+  private errorHasStatus(error: unknown, status: number): boolean {
+    return Boolean(error && typeof error === 'object' && 'status' in error && error.status === status);
+  }
+
+  private startPackageDetectionObservation(
+    deviceId: string,
+    streamProfile: HarborAssistantCatDetectionStreamProfile,
+  ): void {
+    this.stopPackageDetectionObservation();
+    const token = this.packageDetectionToken;
+    this.observePackageDetection(deviceId, streamProfile, token);
+  }
+
+  private observePackageDetection(
+    deviceId: string,
+    streamProfile: HarborAssistantCatDetectionStreamProfile,
+    token: number,
+  ): void {
+    this.api.packageDetectionObservationForCamera(deviceId, streamProfile).pipe(
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (job) => {
+        if (!this.packageDetectionObservationIsCurrent(deviceId, token)) {
+          return;
+        }
+        this.packageDetectionTransientError.set(null);
+        if (job.status === 'running' || job.status === 'failed' || job.status === 'starting'
+          || job.status === 'stopping' || job.status === 'stopped') {
+          this.packageDetectionEffectiveStatus.set(job.status);
+        }
+        if (job.status === 'running') {
+          this.receivePackageDetectionJob(job);
+        } else {
+          this.clearPackageDetectionResult();
+        }
+        this.refreshPackageEventStatus(deviceId, token);
+        this.schedulePackageDetectionPoll(deviceId, streamProfile, token);
+      },
+      error: (error: unknown) => {
+        if (!this.packageDetectionObservationIsCurrent(deviceId, token)) {
+          return;
+        }
+        this.clearPackageDetectionResult();
+        const notFound = this.detectionJobNotFound(error);
+        this.packageDetectionEffectiveStatus.set(notFound ? 'starting' : 'failed');
+        if (!notFound) {
+          this.packageDetectionTransientError.set(
+            this.translate.instant('Unable to observe package detection.'),
+          );
+        }
+        this.refreshPackageEventStatus(deviceId, token);
+        this.schedulePackageDetectionPoll(deviceId, streamProfile, token, notFound ? 500 : 2_000);
+      },
+    });
+  }
+
+  private schedulePackageDetectionPoll(
+    deviceId: string,
+    streamProfile: HarborAssistantCatDetectionStreamProfile,
+    token: number,
+    delayMs = this.catDetectionPollIntervalMs,
+  ): void {
+    this.clearPackageDetectionPollTimer();
+    this.packageDetectionPollTimer = this.window.setTimeout(() => {
+      this.packageDetectionPollTimer = null;
+      if (this.packageDetectionObservationIsCurrent(deviceId, token)) {
+        this.observePackageDetection(deviceId, streamProfile, token);
+      }
+    }, delayMs);
+  }
+
+  private packageDetectionObservationIsCurrent(deviceId: string, token: number): boolean {
+    return !this.destroyed
+      && token === this.packageDetectionToken
+      && deviceId === this.selectedCameraId()
+      && this.packageDetectionEnabled();
+  }
+
+  private stopPackageDetectionObservation(): void {
+    this.packageDetectionToken += 1;
+    this.packageEventStatusRefreshToken += 1;
+    this.clearPackageDetectionPollTimer();
+    this.clearPackageDetectionResult();
+  }
+
+  private clearPackageDetectionPollTimer(): void {
+    if (this.packageDetectionPollTimer === null) {
+      return;
+    }
+    this.window.clearTimeout(this.packageDetectionPollTimer);
+    this.packageDetectionPollTimer = null;
+  }
+
+  private clearPackageDetectionResult(): void {
+    this.packageDetectionJob.set(null);
+    this.packageDetectionResultReceivedAtMs = null;
+    this.packageDetectionResultSequence = null;
+    this.clearCatDetectionOverlay();
+  }
+
+  private receivePackageDetectionJob(job: HarborAssistantCatDetectionObservation): void {
+    const result = job.latest_result;
+    if (!result) {
+      this.packageDetectionResultReceivedAtMs = null;
+      this.packageDetectionResultSequence = null;
+    } else if (result.sequence !== this.packageDetectionResultSequence) {
+      this.packageDetectionResultSequence = result.sequence;
+      this.packageDetectionResultReceivedAtMs = this.monotonicNow();
+    }
+    this.packageDetectionJob.set(job);
+    this.drawPackageDetectionOverlay(result);
+  }
+
+  private startCatDetectionObservation(
+    deviceId: string,
+    streamProfile: HarborAssistantCatDetectionStreamProfile,
+  ): void {
+    this.stopCatDetectionObservation();
+    const token = this.catDetectionToken;
     this.api.detectionJobForCamera(deviceId, streamProfile).pipe(
       takeUntilDestroyed(this.destroyRef),
     ).subscribe({
       next: (job) => {
-        if (
-          this.destroyed
-          || token !== this.catDetectionToken
-          || !this.catDetectionRequestedEnabled
-        ) {
+        if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
           return;
         }
-        this.catDetectionBusy.set(false);
-        this.receiveCatDetectionJob(job);
+        if (this.catDetectionObservationIsTerminal(job.status)) {
+          this.finishCatDetectionObservation(job.status);
+          this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
+          return;
+        }
+        if (job.status === 'running') {
+          this.catDetectionEffectiveStatus.set('running');
+          this.catDetectionTransientError.set(null);
+          this.receiveCatDetectionJob(job);
+        }
         this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
       },
       error: (error: unknown) => {
-        if (this.destroyed || token !== this.catDetectionToken) {
+        if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
           return;
         }
-        this.stopCatDetection();
-        if (!this.detectionJobNotFound(error)) {
-          this.catDetectionError.set(this.translate.instant('Unable to observe cat detection.'));
+        if (this.detectionJobNotFound(error)) {
+          this.finishCatDetectionObservation('stopped');
+          this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
+          return;
         }
+        this.catDetectionTransientError.set(this.translate.instant('Unable to observe cat detection.'));
+        this.catDetectionEffectiveStatus.set('failed');
+        this.clearCatDetectionResult();
+        this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
       },
     });
   }
@@ -833,56 +1655,80 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.clearCatDetectionPollTimer();
     this.catDetectionPollTimer = this.window.setTimeout(() => {
       this.catDetectionPollTimer = null;
-      if (!this.catDetectionEnabled() || token !== this.catDetectionToken) {
+      if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
         return;
       }
       this.api.detectionJobForCamera(deviceId, streamProfile).pipe(
         takeUntilDestroyed(this.destroyRef),
       ).subscribe({
         next: (job) => {
-          if (token !== this.catDetectionToken) {
+          if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
             return;
           }
-          this.catDetectionError.set(null);
-          this.receiveCatDetectionJob(job);
+          this.catDetectionTransientError.set(null);
           if (job.status === 'running') {
+            this.catDetectionEffectiveStatus.set('running');
+            this.receiveCatDetectionJob(job);
             this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
             return;
           }
-          this.stopCatDetection();
-          this.catDetectionError.set(this.translate.instant('Cat detection stopped.'));
+          if (this.catDetectionObservationIsTerminal(job.status)) {
+            this.finishCatDetectionObservation(job.status);
+            this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
+            return;
+          }
+          this.scheduleCatDetectionPoll(deviceId, streamProfile, token);
         },
         error: (error: unknown) => {
-          if (token !== this.catDetectionToken) {
+          if (!this.catDetectionObservationIsCurrent(deviceId, token)) {
             return;
           }
           if (this.detectionJobNotFound(error)) {
-            this.stopCatDetection();
+            this.finishCatDetectionObservation('stopped');
+            this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
             return;
           }
-          this.catDetectionError.set(this.translate.instant('Unable to observe cat detection.'));
-          this.clearCatDetectionOverlay();
+          this.catDetectionTransientError.set(this.translate.instant('Unable to observe cat detection.'));
+          this.catDetectionEffectiveStatus.set('failed');
+          this.clearCatDetectionResult();
           this.scheduleCatDetectionPoll(deviceId, streamProfile, token, 2_000);
         },
       });
     }, delayMs);
   }
 
-  private stopCatDetection(): void {
+  private catDetectionObservationIsCurrent(deviceId: string, token: number): boolean {
+    return !this.destroyed
+      && token === this.catDetectionToken
+      && deviceId === this.selectedCameraId()
+      && this.catDetectionEnabled();
+  }
+
+  private catDetectionObservationIsTerminal(status: string): boolean {
+    return status === 'stopped' || status === 'failed';
+  }
+
+  private finishCatDetectionObservation(status: string): void {
+    this.catDetectionEffectiveStatus.set(status === 'failed' ? 'failed' : 'stopped');
+    this.clearCatDetectionResult();
+  }
+
+  private stopCatDetectionObservation(): void {
     this.catDetectionToken += 1;
-    this.catDetectionRequestedEnabled = false;
     this.clearCatDetectionTimers();
-    this.catDetectionBusy.set(false);
-    this.catDetectionEnabled.set(false);
-    this.catDetectionError.set(null);
+    this.clearCatDetectionResult();
+  }
+
+  private clearCatDetectionResult(): void {
     this.catDetectionJob.set(null);
     this.catDetectionResultReceivedAtMs = null;
     this.catDetectionResultSequence = null;
     this.clearCatDetectionOverlay();
   }
 
-  private stopCatDetectionOnPageExit(): void {
-    this.stopCatDetection();
+  private stopDetectionObservationOnPageExit(): void {
+    this.stopCatDetectionObservation();
+    this.stopPackageDetectionObservation();
   }
 
   private detectionJobNotFound(error: unknown): boolean {
@@ -921,7 +1767,64 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     return Date.now();
   }
 
+  private refreshPersonPreview(): void {
+    const video = this.liveVideo?.nativeElement;
+    const canvas = this.personDetectionOverlay?.nativeElement;
+    const camera = this.selectedCameraId();
+    const context = canvas?.getContext('2d');
+    const active = this.selectedTabIndex() === 0
+      && !!camera && !!video && !!canvas && !video.paused && video.readyState >= 2
+      && this.hlsLiveStatus() === 'live' && !document.hidden && this.packageEventConfig()?.person_association_enabled;
+    if (!active || this.monotonicNow() - this.personPreviewDisplayedAt > this.personPreviewMaxAgeMs) {
+      if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    if (!active || this.personPreviewPending) return;
+    const captured = this.monotonicNow();
+    const frameId = ++this.personPreviewFrameId;
+    const capture = document.createElement('canvas');
+    const scale = Math.min(1, 720 / Math.max(video.videoWidth, video.videoHeight));
+    capture.width = Math.round(video.videoWidth * scale);
+    capture.height = Math.round(video.videoHeight * scale);
+    const captureContext = capture.getContext('2d');
+    if (!captureContext || !capture.width || !capture.height) return;
+    let encoded: string;
+    try {
+      captureContext.drawImage(video, 0, 0, capture.width, capture.height);
+      encoded = capture.toDataURL('image/jpeg', 0.75).split(',')[1];
+    } catch {
+      return;
+    }
+    this.personPreviewPending = true;
+    this.api.personPreview(camera, encoded, frameId).pipe(
+      finalize(() => { this.personPreviewPending = false; }),
+      takeUntilDestroyed(this.destroyRef),
+    ).subscribe({
+      next: (response) => {
+        if (camera !== this.selectedCameraId() || response.camera_id !== camera || response.frame_id !== frameId
+          || frameId !== this.personPreviewFrameId || this.selectedTabIndex() !== 0
+          || this.monotonicNow() - captured > this.personPreviewMaxAgeMs || video.paused || document.hidden
+          || !this.packageEventConfig()?.person_association_enabled || this.hlsLiveStatus() !== 'live') return;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        drawPersonBoxes(canvas, response.result.frames[0]?.detections ?? [], this.translate.instant('Person'));
+        this.personPreviewDisplayedAt = captured;
+      },
+      error: () => { if (context) context.clearRect(0, 0, canvas.width, canvas.height); },
+    });
+  }
+
   private drawCatDetectionOverlay(result: HarborAssistantDetectionResult | null | undefined): void {
+    this.drawDetectionOverlay('cat', result);
+  }
+
+  private drawPackageDetectionOverlay(result: HarborAssistantDetectionResult | null | undefined): void {
+    this.drawDetectionOverlay('package', result);
+  }
+
+  private drawDetectionOverlay(
+    targetLabel: 'cat' | 'package',
+    result: HarborAssistantDetectionResult | null | undefined,
+  ): void {
     const canvas = this.catDetectionOverlay?.nativeElement;
     const video = this.liveVideo?.nativeElement;
     if (!canvas || !video || video.videoWidth <= 0 || video.videoHeight <= 0) {
@@ -934,29 +1837,38 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       return;
     }
     context.clearRect(0, 0, canvas.width, canvas.height);
+    const enabled = targetLabel === 'cat' ? this.catDetectionEnabled() : this.packageDetectionEnabled();
+    const resultSequence = targetLabel === 'cat'
+      ? this.catDetectionResultSequence
+      : this.packageDetectionResultSequence;
+    const resultReceivedAtMs = targetLabel === 'cat'
+      ? this.catDetectionResultReceivedAtMs
+      : this.packageDetectionResultReceivedAtMs;
     if (
-      !this.catDetectionEnabled()
+      !enabled
       || !result
-      || result.sequence !== this.catDetectionResultSequence
-      || this.catDetectionResultReceivedAtMs === null
-      || this.monotonicNow() - this.catDetectionResultReceivedAtMs > this.catDetectionResultMaxAgeMs
+      || result.target_label.toLowerCase() !== targetLabel
+      || result.sequence !== resultSequence
+      || resultReceivedAtMs === null
+      || this.monotonicNow() - resultReceivedAtMs > this.catDetectionResultMaxAgeMs
     ) {
       return;
     }
     context.font = `${Math.max(12, Math.round(canvas.width / 80))}px sans-serif`;
     context.lineWidth = Math.max(2, canvas.width / 640);
-    context.strokeStyle = '#00dc50';
-    for (const detection of result.detections.filter((item) => item.label.toLowerCase() === 'cat')) {
+    context.strokeStyle = targetLabel === 'cat' ? '#00dc50' : '#ffb000';
+    for (const detection of result.detections.filter((item) => item.label.toLowerCase() === targetLabel)) {
       const x = Math.max(0, detection.x1);
       const y = Math.max(0, detection.y1);
       const width = Math.max(0, Math.min(canvas.width, detection.x2) - x);
       const height = Math.max(0, Math.min(canvas.height, detection.y2) - y);
       context.strokeRect(x, y, width, height);
-      const label = `${this.translate.instant('Cat')} ${Math.round(detection.confidence * 100)}%`;
+      const labelKey = targetLabel === 'cat' ? 'Cat' : 'Package';
+      const label = `${this.translate.instant(labelKey)} ${Math.round(detection.confidence * 100)}%`;
       const labelWidth = context.measureText(label).width + 10;
       const labelHeight = Math.max(18, Math.round(canvas.width / 64));
       const labelY = Math.max(0, y - labelHeight);
-      context.fillStyle = 'rgba(0, 90, 36, 0.9)';
+      context.fillStyle = targetLabel === 'cat' ? 'rgba(0, 90, 36, 0.9)' : 'rgba(104, 67, 0, 0.92)';
       context.fillRect(x, labelY, labelWidth, labelHeight);
       context.fillStyle = '#fff';
       context.fillText(label, x + 5, labelY + labelHeight - 4);
@@ -1052,6 +1964,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
         this.applySessionStreamProfile(session);
         this.hlsLiveSession.set(session);
         if (session.session_id) {
+          this.loadPackageDetectionControl(session.device_id || deviceId);
           this.scheduleLiveSessionRenewal(session);
           this.rememberLivePlaybackUrls(session);
           const usingWebRtc = this.startWebRtcPlaybackFromSession(session);
@@ -1396,7 +2309,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     const session = this.hlsLiveSession();
     const deviceId = session?.device_id ?? this.selectedCameraId();
     const wasStarting = this.hlsLiveStatus() === 'starting';
-    this.stopCatDetection();
+    this.stopCatDetectionObservation();
+    this.stopPackageDetectionObservation();
     this.hlsAttachToken += 1;
     this.hlsPlaybackToken += 1;
     this.hlsRecoveryAttempts = 0;
@@ -1495,7 +2409,6 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   private cancelLiveStreamProfileSwitch(): void {
     const wasSwitching = this.liveStreamSwitching();
     this.liveStreamSwitchTarget = null;
-    this.liveStreamSwitchRestoreCatDetection = false;
     this.liveStreamSwitching.set(false);
     if (wasSwitching) {
       this.cancelLiveTransportTransition();
@@ -1511,14 +2424,9 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     ) {
       return;
     }
-    const restoreCatDetection = this.liveStreamSwitchRestoreCatDetection;
     this.liveStreamSwitchTarget = null;
-    this.liveStreamSwitchRestoreCatDetection = false;
     this.liveStreamSwitching.set(false);
-    if (restoreCatDetection) {
-      this.catDetectionRequestedEnabled = true;
-      this.startCatDetection();
-    }
+    this.loadPackageDetectionControl(this.selectedCameraId());
   }
 
   private liveSessionAlreadyAbsent(error: unknown): boolean {
@@ -1614,6 +2522,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
       && !this.liveStopUnconfirmed
       && !this.liveStreamSwitching()
       && !this.catDetectionBusy()
+      && !this.packageDetectionBusy()
       && this.hlsLiveStatus() !== 'starting'
       && this.hlsLiveStatus() !== 'live';
   }
@@ -1625,8 +2534,17 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
   onCameraTabChange(index: number): void {
     this.selectedTabIndex.set(index);
     if (index !== 0) {
+      this.personPreviewFrameId += 1;
+      const canvas = this.personDetectionOverlay?.nativeElement;
+      if (canvas) {
+        canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      this.stopCatDetectionObservation();
+      this.stopPackageDetectionObservation();
       return;
     }
+    this.loadCatDetectionControl(this.selectedCameraId());
+    this.loadPackageDetectionControl(this.selectedCameraId());
     this.pausePlaybackVideo();
     if (this.livePlaybackBackgroundPaused) {
       if (this.liveControlPlaybackMode() === 'webrtc') {
@@ -1663,7 +2581,7 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.markHlsPlaybackReady();
     this.resumeLivePlayback();
     this.scheduleLiveTransportFrameReveal();
-    this.drawCatDetectionOverlay(this.catDetectionJob()?.latest_result);
+    this.drawActiveDetectionOverlay();
   }
 
   onLiveVideoPlaying(): void {
@@ -1682,6 +2600,14 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
     this.syncLiveControlState();
     this.markHlsPlaybackReady();
     this.scheduleLiveTransportFrameReveal();
+    this.drawActiveDetectionOverlay();
+  }
+
+  private drawActiveDetectionOverlay(): void {
+    if (this.packageDetectionEnabled()) {
+      this.drawPackageDetectionOverlay(this.packageDetectionJob()?.latest_result);
+      return;
+    }
     this.drawCatDetectionOverlay(this.catDetectionJob()?.latest_result);
   }
 
@@ -2139,6 +3065,8 @@ export class HarborAssistantCameraComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.destroyed = true;
+    this.stopCatDetectionObservation();
+    this.stopPackageDetectionObservation();
     this.clearLivePendingStartStopTimer();
     this.clearRecordingFinalizationTimer();
     this.stopHlsPlayback();
