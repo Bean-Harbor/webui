@@ -1,4 +1,5 @@
 import fs, { existsSync, readFileSync } from 'fs';
+import { pathToFileURL } from 'url';
 import { WebUiEnvironment } from 'environments/environment.interface';
 import {
   isArray, mergeWith,
@@ -89,5 +90,5 @@ export async function getCurrentConfig(): Promise<WebUiEnvironment> {
     return {} as WebUiEnvironment;
   }
 
-  return (await import(environmentTs) as { environment: WebUiEnvironment }).environment;
+  return (await import(pathToFileURL(environmentTs).href) as { environment: WebUiEnvironment }).environment;
 }
